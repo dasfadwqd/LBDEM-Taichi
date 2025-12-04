@@ -10,7 +10,7 @@ import taichi.math as tm
 from src.lbm3d.lbm_solver3d import BasicLattice3D
 from src.lbm3d.lbmutils import CellType
 # DEM module
-from src.dem3d.demslover import DEMSolver, DEMSolverConfig
+from src.dem3d.demsolver import DEMSolver
 
 # =====================================
 # Type Definition

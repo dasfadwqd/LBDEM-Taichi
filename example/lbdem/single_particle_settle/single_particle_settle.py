@@ -4,6 +4,9 @@ Reference: https://doi.org/10.1063/1.1512918
 '''
 
 import os
+
+from example.dem3d.particle3d.grainfreefall import domain
+
 os.system('clear')
 import time
 import pickle
@@ -21,7 +24,8 @@ SAVE_RESULTS = True
 # source package
 from src.lbdem.psclattice3d import PSCLattice3D
 from src.lbm3d.lbmutils import CellType
-from src.dem3d.demslover import DEMSolver, DEMSolverConfig
+from src.dem3d.demsolver import DEMSolver
+from src.dem3d.demconfig import DEMSolverConfig , DomainBounds, LinearContactConfig ,HertzContactConfig
 
 Vector3 = ti.types.vector(3, float)
 
@@ -97,43 +101,52 @@ if SAVE_RESULTS:
 # ----- Initialize DEM Simulation ----- #
 # =======================================#
 # instantiate DEM simulation
-config = DEMSolverConfig(xmin=np.min(x) + 0.5 * dx,
-                 xmax=np.max(x) - 0.5 * dx,
-                 ymin=np.min(y) + 0.5 * dx,
-                 ymax=np.max(y) - 0.5 * dx,
-                 zmin=np.min(z) + 0.5 * dx,
-                 zmax=np.max(z) - 0.5 * dx,
-                 dt=dtDEM,
-                 grav=grav)
+xmin=np.min(x) + 0.5 * dx,
+xmax=np.max(x) - 0.5 * dx,
+ymin=np.min(y) + 0.5 * dx,
+ymax=np.max(y) - 0.5 * dx,
+zmin=np.min(z) + 0.5 * dx,
+zmax=np.max(z) - 0.5 * dx,
+domain = DomainBounds(xmin,
+                 xmax,
+                 ymin,
+                 ymax,
+                 zmin,
+                 zmax)
 
+contact_model = LinearContactConfig(
+    stiffness_normal=1e6,
+    stiffness_tangential=1e6,
+    damping_normal=0.1,
+    damping_tangential=0.1,
+    pp_friction=0.2,
+    pw_friction=0.2
+ )
 # Set up particle properties
+config = DEMSolverConfig(
+        domain=domain,
+        dt=dtDEM,
+        gravity=grav,
+        contact_model=contact_model
+    )
+
 config.set_particle_properties(
-    init_particles=particle_init,
     elastic_modulus=1e8,
-    poisson_ratio=0.2,
-    stiffness_normal=stiffness,
-    stiffness_tangential=stiffness,
-    damping_normal=dp_ratio,
-    damping_tangential=dp_ratio
+    poisson_ratio=0.3
 )
-
-
-# Set up contact properties for collision handling
-config.set_contact_properties(
-    pp_friction=fric,  # Particle-particle friction
-    pw_friction=fric,  # Particle-wall friction
-    pp_restitution=0.9,  # Particle-particle restitution
-    pw_restitution=0.9,  # Particle-wall restitution
-    contact_model=contact_model,  # Contact model type
-    set_max_coordinate_number=10  # Max contacts per particle
+config.set_wall_properties(
+    elastic_modulus=1e8,
+    poisson_ratio=0.3
 )
 
 # Initialize solver
-domain_min = config.set_domain_min
-domain_max = config.set_domain_max
+domain_min = Vector3(xmin , ymin ,zmin)
+domain_max = Vector3(xmax , ymax ,zmax)
 demsolver = DEMSolver(config)
-demsolver.init_particle_fields(config.set_init_particles, domain_min, domain_max)
-demsolver.set_contact_model(config.contact_model)
+demsolver.init_particle_fields(particle_init, domain_min, domain_max)
+demsolver.set_contact_model("linear")
+
+print(config.summary())
 
 # Print spatial partitioning info for debugging
 print(f"Hash table size = {demsolver.bpcd.hash_table.shape[0]}, cell_size = {demsolver.bpcd.cell_size}")
@@ -174,14 +187,6 @@ print('Relaxation time: {:.3f}'.format(tau))
 print('Reynolds number: {:.3f}'.format(Re))
 print('Mach number: {}'.format(umaxLU * np.sqrt(3)))
 print('-----------------------')
-print('DEM info')
-print('Domain extend: x({}, {}), y({}, {}) , z({}, {}) '.format(demsolver.config.xmin, demsolver.config.xmax, demsolver.config.ymin,
-                                                                demsolver.config.ymax, demsolver.config.zmin, demsolver.config.zmax))
-print('Time step: {} s'.format(demsolver.config.dt))
-print('-----------------------')
-print('Simulation info')
-print('Total steps: {}'.format(totalSteps))
-print('Save data every {} steps'.format(logSteps))
 print('*****************************************')
 
 # ==============================#
