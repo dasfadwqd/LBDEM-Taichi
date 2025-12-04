@@ -5,8 +5,6 @@ Reference: https://doi.org/10.1063/1.1512918
 
 import os
 
-from example.dem3d.particle3d.grainfreefall import domain
-
 os.system('clear')
 import time
 import pickle
@@ -45,6 +43,33 @@ def setContainer(lattice: PSCLattice3D):
 # ==================================#
 # ----- Parameter Declaration -----#
 # ==================================#
+
+CASES = {
+    'case1': {
+        'Re': 31.9,
+        'umax': 12.8e-2,
+        'mu': 58e-3,
+        'rho': 960.0,
+    },
+    'case2': {
+        'Re': 11.6,
+        'umax': 9.1e-2,
+        'mu': 113e-3,
+        'rho': 962.0,
+    },
+    'case3': {
+        'Re': 4.1,
+        'umax': 6.0e-2,
+        'mu': 212e-3,
+        'rho': 965.0,
+    },
+    'case4': {
+        'Re': 1.5,
+        'umax': 3.8e-2,
+        'mu': 373e-3,
+        'rho': 970.0,
+    },
+}
 # domain geometry and discretizations
 lx = 0.1  # dimension in x-direction [m]
 ly = 0.16  # dimension in y-direction [m]
@@ -58,24 +83,26 @@ x = np.arange(Nx) * dx - 0.5 * dx  # x-coordinates [m]
 y = np.arange(Ny) * dx - 0.5 * dx  # y-coordinates [m]
 z = np.arange(Nz) * dx - 0.5 * dx  # z-coordinates [m]
 
-# fluid properties
-rho = 960.0  # fluid density [kg/m^3]
-mu = 58e-3  # fluid dynamic viscosity [Pa s]
-nu = mu/rho  # fluid kinematic viscosity [m^2/s]
+
 
 dens = 1120  # particle density [kg/m3]
 
-# flow velocity at the entrance and flow regime
-Re = 31.9 # Reynolds number
-umax = 12.8e-2
+case_id = 'case2'
 
+# fluid properties
+params = CASES[case_id]
+# fluid properties
+rho = params['rho'] # fluid density [kg/m^3]
+mu = params['mu']  # fluid dynamic viscosity [Pa s]
+nu = mu/rho  # fluid kinematic viscosity [m^2/s]
+# flow velocity at the entrance and flow regime
+Re = params['Re'] # Reynolds number
+umax = params['umax']
 
 # DEM simulation parameters
 particle_init = 'single_particle.p4p'
-stiffness = 1e5                                                # contact stiffness [N/m]
-dp_ratio = 0.2                                                  # critical damping ratio
-fric = 0.0                                                      # friction coefficient
-contact_model = 'linear'
+
+
 grav = Vector3(0.0, -9.81*(dens-rho)/dens , 0.0)                          # reduced gravity due to buoyancy [m/s^2]
 # LBM relaxation time and time step
 tau = 0.60  # relaxation time
@@ -107,12 +134,13 @@ ymin=np.min(y) + 0.5 * dx,
 ymax=np.max(y) - 0.5 * dx,
 zmin=np.min(z) + 0.5 * dx,
 zmax=np.max(z) - 0.5 * dx,
-domain = DomainBounds(xmin,
-                 xmax,
-                 ymin,
-                 ymax,
-                 zmin,
-                 zmax)
+domain = DomainBounds(xmin=np.min(x) + 0.5 * dx,
+        xmax=np.max(x) - 0.5 * dx,
+        ymin=np.min(y) + 0.5 * dx,
+        ymax=np.max(y) - 0.5 * dx,
+        zmin=np.min(z) + 0.5 * dx,
+        zmax=np.max(z) - 0.5 * dx,
+                      )
 
 contact_model = LinearContactConfig(
     stiffness_normal=1e6,

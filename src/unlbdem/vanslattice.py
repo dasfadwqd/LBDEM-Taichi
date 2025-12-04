@@ -21,7 +21,7 @@ from src.lbm3d.lbm_solver3d import BasicLattice3D
 from src.lbm3d.lbmutils import CellType
 
 # DEM module - Discrete Element Method components
-from src.dem3d.demslover import DEMSolver, DEMSolverConfig
+from src.dem3d.demsolver import DEMSolver
 
 from src.unlbdem.utils import Interpolation
 
@@ -143,9 +143,9 @@ class Unresolvedlattice3D(BasicLattice3D):
         # Process each grain independently
         for grain_id in range(self.dem.gf.shape[0]):
             # 获取颗粒位置
-            xc = (self.dem.gf[grain_id].position[0] - self.dem.config.xmin + 0.5 * self.unit.dx) / self.unit.dx
-            yc = (self.dem.gf[grain_id].position[1] - self.dem.config.ymin + 0.5 * self.unit.dx) / self.unit.dx
-            zc = (self.dem.gf[grain_id].position[2] - self.dem.config.zmin + 0.5 * self.unit.dx) / self.unit.dx
+            xc = (self.dem.gf[grain_id].position[0] - self.dem.config.domain.xmin + 0.5 * self.unit.dx) / self.unit.dx
+            yc = (self.dem.gf[grain_id].position[1] - self.dem.config.domain.ymin + 0.5 * self.unit.dx) / self.unit.dx
+            zc = (self.dem.gf[grain_id].position[2] - self.dem.config.domain.zmin + 0.5 * self.unit.dx) / self.unit.dx
 
             r = self.dem.gf[grain_id].radius / self.unit.dx
 
@@ -446,9 +446,9 @@ class Unresolvedlattice3D(BasicLattice3D):
         self.dem.gf.force_fluid.fill(0.0)
         for id in range(self.dem.gf.shape[0]):
             # convert grain position and size to lattice units
-            xc = (self.dem.gf[id].position[0] - self.dem.config.xmin + 0.5 * self.unit.dx) / self.unit.dx
-            yc = (self.dem.gf[id].position[1] - self.dem.config.ymin + 0.5 * self.unit.dx) / self.unit.dx
-            zc = (self.dem.gf[id].position[2] - self.dem.config.zmin + 0.5 * self.unit.dx) / self.unit.dx
+            xc = (self.dem.gf[id].position[0] - self.dem.config.domain.xmin + 0.5 * self.unit.dx) / self.unit.dx
+            yc = (self.dem.gf[id].position[1] - self.dem.config.domain.ymin + 0.5 * self.unit.dx) / self.unit.dx
+            zc = (self.dem.gf[id].position[2] - self.dem.config.domain.zmin + 0.5 * self.unit.dx) / self.unit.dx
             r = self.dem.gf[id].radius / self.unit.dx
 
             # extents of the lattice covered by the grain
@@ -497,9 +497,9 @@ class Unresolvedlattice3D(BasicLattice3D):
         # Process each grain independently
         for grain_id in range(self.dem.gf.shape[0]):  # ← 这是 range_for，允许
             # Convert grain position [m] to lattice coordinates (floating-point)
-            xc = (self.dem.gf[grain_id].position[0] - self.dem.config.xmin + 0.5 * self.unit.dx) / self.unit.dx
-            yc = (self.dem.gf[grain_id].position[1] - self.dem.config.ymin + 0.5 * self.unit.dx) / self.unit.dx
-            zc = (self.dem.gf[grain_id].position[2] - self.dem.config.zmin + 0.5 * self.unit.dx) / self.unit.dx
+            xc = (self.dem.gf[grain_id].position[0] - self.dem.config.domain.xmin + 0.5 * self.unit.dx) / self.unit.dx
+            yc = (self.dem.gf[grain_id].position[1] - self.dem.config.domain.ymin + 0.5 * self.unit.dx) / self.unit.dx
+            zc = (self.dem.gf[grain_id].position[2] - self.dem.config.domain.zmin + 0.5 * self.unit.dx) / self.unit.dx
 
             r_lat = self.dem.gf[grain_id].radius / self.unit.dx
             kernel_support = 1.5

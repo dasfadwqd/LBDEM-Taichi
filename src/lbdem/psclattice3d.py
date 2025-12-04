@@ -100,9 +100,9 @@ class PSCLattice3D(BasicLattice3D):
             # loop through all grains
             for id in range(self.dem.gf.shape[0]):
                 # convert grain position and size to lattice units
-                xc = (self.dem.gf[id].position[0] - self.dem.config.xmin + 0.5 * self.unit.dx) / self.unit.dx
-                yc = (self.dem.gf[id].position[1] - self.dem.config.ymin + 0.5 * self.unit.dx) / self.unit.dx
-                zc = (self.dem.gf[id].position[2] - self.dem.config.zmin + 0.5 * self.unit.dx) / self.unit.dx
+                xc = (self.dem.gf[id].position[0] - self.dem.config.domain.xmin + 0.5 * self.unit.dx) / self.unit.dx
+                yc = (self.dem.gf[id].position[1] - self.dem.config.domain.ymin + 0.5 * self.unit.dx) / self.unit.dx
+                zc = (self.dem.gf[id].position[2] - self.dem.config.domain.zmin + 0.5 * self.unit.dx) / self.unit.dx
                 r = (self.dem.gf[id].radius - 0.5 * self.unit.dx) / self.unit.dx
 
                 # calculate the distance from cell center to grain center
@@ -286,9 +286,9 @@ class PSCLattice3D(BasicLattice3D):
             grain_id = self.id[i, j, k]
             if grain_id >= 0:
                 # convert grain center position to lattice units
-                xc = (self.dem.gf[grain_id].position[0] - self.dem.config.xmin + 0.5 * self.unit.dx) / self.unit.dx
-                yc = (self.dem.gf[grain_id].position[1] - self.dem.config.ymin + 0.5 * self.unit.dx) / self.unit.dx
-                zc = (self.dem.gf[grain_id].position[2] - self.dem.config.zmin + 0.5 * self.unit.dx) / self.unit.dx
+                xc = (self.dem.gf[grain_id].position[0] - self.dem.config.domain.xmin + 0.5 * self.unit.dx) / self.unit.dx
+                yc = (self.dem.gf[grain_id].position[1] - self.dem.config.domain.ymin + 0.5 * self.unit.dx) / self.unit.dx
+                zc = (self.dem.gf[grain_id].position[2] - self.dem.config.domain.zmin + 0.5 * self.unit.dx) / self.unit.dx
 
                 # position vector from grain center to lattice node: (x_j - x_g)
                 r_vec = Vector3(i, j, k) - Vector3(xc, yc, zc)
@@ -332,9 +332,9 @@ class PSCLattice3D(BasicLattice3D):
 
         for id in range(self.dem.gf.shape[0]):
             # convert grain position and size to lattice units
-            xc = (self.dem.gf[id].position[0] - self.dem.config.xmin + 0.5 * self.unit.dx) / self.unit.dx
-            yc = (self.dem.gf[id].position[1] - self.dem.config.ymin + 0.5 * self.unit.dx) / self.unit.dx
-            zc = (self.dem.gf[id].position[2] - self.dem.config.zmin + 0.5 * self.unit.dx) / self.unit.dx
+            xc = (self.dem.gf[id].position[0] - self.dem.config.domain.xmin + 0.5 * self.unit.dx) / self.unit.dx
+            yc = (self.dem.gf[id].position[1] - self.dem.config.domain.ymin + 0.5 * self.unit.dx) / self.unit.dx
+            zc = (self.dem.gf[id].position[2] - self.dem.config.domain.zmin + 0.5 * self.unit.dx) / self.unit.dx
             r = self.dem.gf[id].radius / self.unit.dx
 
             # extents of the lattice covered by the grain
