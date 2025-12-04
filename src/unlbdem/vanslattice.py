@@ -483,19 +483,23 @@ class Unresolvedlattice3D(BasicLattice3D):
     # =====================================
     # Hydrodynamic Force Coupling (DEM to LBM)
     # =====================================
+    # =====================================
+    # Grain-to-Lattice Mapping (DEM → LBM)
+    # =====================================
     @ti.kernel
     def force2lattice(self):
         """
-        Map DEM particle forces and solid volume fraction to LBM lattice (two-way coupling).
+        Map DEM grain volume and hydrodynamic force to LBM lattice in a single pass.
         Uses threedelta kernel (support radius 1.5 lattice units) for interpolation.
-        Boundary weight correction ensures particle volume conservation in fluid cells.
+        Boundary weight correction ensures conservation of particle volume and force
+        in fluid cells near obstacles.
         """
-        # Reset solid volume fraction to pure fluid state
-
+        # Reset solid volume fraction and hydrodynamic force to pure fluid state
+        self.volfrac.fill(0.0)
         self.hydroforce.fill(0.0)
 
         # Process each grain independently
-        for grain_id in range(self.dem.gf.shape[0]):  # ← 这是 range_for，允许
+        for grain_id in range(self.dem.gf.shape[0]):
             # Convert grain position [m] to lattice coordinates (floating-point)
             xc = (self.dem.gf[grain_id].position[0] - self.dem.config.domain.xmin + 0.5 * self.unit.dx) / self.unit.dx
             yc = (self.dem.gf[grain_id].position[1] - self.dem.config.domain.ymin + 0.5 * self.unit.dx) / self.unit.dx
@@ -511,12 +515,10 @@ class Unresolvedlattice3D(BasicLattice3D):
             k_min = ti.max(0, int(ti.floor(zc - kernel_support)))
             k_max = ti.min(self.Nz - 1, int(ti.ceil(zc + kernel_support)))
 
-            # First pass: calculate weights
+            # First pass: calculate total interpolation weights for correction
             valid_weight_sum = 0.0
             boundary_weight_sum = 0.0
 
-            # 注意：这里不能用 ti.ndrange 嵌套在 grain_id 循环里！
-            # 但我们可以用 range() + 条件判断
             for i in range(i_min, i_max + 1):
                 for j in range(j_min, j_max + 1):
                     for k in range(k_min, k_max + 1):
@@ -533,10 +535,10 @@ class Unresolvedlattice3D(BasicLattice3D):
             if valid_weight_sum > 1e-10:
                 correction_factor = total_weight / valid_weight_sum
 
-            # Second pass: update fields
-
+            # Second pass: update both volume fraction and hydrodynamic force
+            V_grain = 4.0 / 3.0 * tm.pi * self.dem.gf[grain_id].radius ** 3
+            V_cell = self.unit.dx ** 3
             fluid_force = self.dem.gf[grain_id].force_fluid
-
 
             for i in range(i_min, i_max + 1):
                 for j in range(j_min, j_max + 1):
@@ -549,8 +551,13 @@ class Unresolvedlattice3D(BasicLattice3D):
                             if w_raw > 1e-10:
                                 w_corrected = w_raw * correction_factor
 
+                                # Accumulate solid volume fraction (dimensionless)
+                                ti.atomic_add(self.volfrac[i, j, k], w_corrected * V_grain / V_cell)
+
+                                # Accumulate hydrodynamic force source term with unit scaling
                                 ti.atomic_add(self.hydroforce[i, j, k],
-                                              w_corrected * fluid_force *  self.unit.dt ** 2 / (self.unit.rho * self.unit.dx ) )
+                                              w_corrected * fluid_force * self.unit.dt ** 2 / (
+                                                          self.unit.rho * self.unit.dx))
 
 
     # =====================================
