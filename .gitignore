@@ -1,0 +1,16 @@
+
+# Python 缓存
+__pycache__/
+*.pyc
+
+# 结果数据（大文件！）
+src/*/Result/
+*.csv
+*.png
+*.vtk
+*.vtu
+*.dat
+
+# IDE
+.idea/
+

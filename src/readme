@@ -1,0 +1,8 @@
+DEM3d
+1.
+LBM3d
+1. 增加了压力边界和速度边界
+lbdem
+1. 全解析的代码
+unlbdem
+非解析代码，基于VANS和LBM，
