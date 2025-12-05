@@ -665,7 +665,7 @@ class Unresolvedlattice3D(BasicLattice3D):
         elif r <= 1.5:
             x = -3.0 * (1.0 - r) ** 2 + 1.0
             a = (5.0 - 3.0 * r - ti.sqrt(x)) / 6.0
-        # else: a = 0.0 (already initialized)
+        
         return a
 
     '''
