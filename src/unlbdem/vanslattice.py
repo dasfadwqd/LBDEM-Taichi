@@ -395,7 +395,7 @@ class Unresolvedlattice3D(BasicLattice3D):
                         self.f[i, j, k][q] = self.fpc[iNext, jNext, k][BasicLattice3D.qsyz[q]]
 
             # update density and velocity if fluid
-            if self.CT[i, j, k] & CellType.FLUID: self.compute_rhof_vel(i, j, k)
+            self.compute_rhof_vel(i, j, k)
 
             # apply boundary conditions (wet node approaches)
             for i, j, k in ti.ndrange(self.Nx, self.Ny, self.Nz):
@@ -431,7 +431,12 @@ class Unresolvedlattice3D(BasicLattice3D):
         # Note: hydroforce is force density [N/m³], so we need to convert to acceleration
         # Formula: u = (momentum / rho) + (dt / 2 / rho) * f_ext
 
-        self.vel[i, j, k] += 0.5 *  self.hydroforce[i, j, k] / self.rho[i, j, k]
+       # self.vel[i, j, k] += 0.5 *  self.hydroforce[i, j, k] / self.rho[i, j, k]
+        self.vel[i, j, k] = 0.5 * self.hydroforce[i, j, k] + self.vel[i, j, k]
+        fvf = 1.0 - self.volfrac[i, j, k]
+        self.vel[i, j, k] = self.vel[i, j, k] / (fvf * self.rho[i, j, k])
+
+
 
         # Optional: check velocity magnitude
         if tm.dot(self.vel[i, j, k], self.vel[i, j, k]) ** 0.5 > BasicLattice3D.velmax:
@@ -480,9 +485,7 @@ class Unresolvedlattice3D(BasicLattice3D):
             self.dem.gf[id].force_fluid += F_d
 
 
-    # =====================================
-    # Hydrodynamic Force Coupling (DEM to LBM)
-    # =====================================
+
     # =====================================
     # Grain-to-Lattice Mapping (DEM → LBM)
     # =====================================
@@ -658,10 +661,11 @@ class Unresolvedlattice3D(BasicLattice3D):
         a = 0.0
         if r < 0.5:
             x = -3.0 * r ** 2 + 1.0
-            a = (1.0 + x * 0.5) / 3.0
+            a = (1.0 + ti.sqrt(x)) / 3.0
         elif r <= 1.5:
             x = -3.0 * (1.0 - r) ** 2 + 1.0
             a = (5.0 - 3.0 * r - ti.sqrt(x)) / 6.0
+        # else: a = 0.0 (already initialized)
         return a
 
     '''
