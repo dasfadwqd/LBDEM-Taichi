@@ -175,10 +175,9 @@ class Unresolvedlattice3D(BasicLattice3D):
                                 valid_weight_sum += w
 
             # Calculate correction factor
-            total_weight = valid_weight_sum + boundary_weight_sum
             correction_factor = 1.0
             if valid_weight_sum > 1e-10:
-                correction_factor = total_weight / valid_weight_sum
+                correction_factor = 1.0 / valid_weight_sum
 
             # Second pass: update volume fraction
             V_grain = 4.0 / 3.0 * tm.pi * self.dem.gf[grain_id].radius ** 3
@@ -353,7 +352,7 @@ class Unresolvedlattice3D(BasicLattice3D):
 
         # Calculate effective viscosity with empirical particle correction
         # Accounts for increased flow resistance in particle-laden regions
-        nu_eff = nuLu * (1.0 + 1.25 * svf * (1.0 - svf) / 0.64) ** 2  # Simplified 2.5/2 to 1.25
+        nu_eff = nuLu * (1.0 + 1.25 * svf  *  0.64 / (1.0 - svf)) ** 2
 
         # Update relaxation frequency based on effective viscosity
         self.omega[i, j, k] = 1.0 / (3.0 * nu_eff + 0.5)
@@ -525,18 +524,15 @@ class Unresolvedlattice3D(BasicLattice3D):
             for i in range(i_min, i_max + 1):
                 for j in range(j_min, j_max + 1):
                     for k in range(k_min, k_max + 1):
+                        if self.CT[i, j, k] & (CellType.OBSTACLE | CellType.VEL_LADD | CellType.FREE_SLIP):
+                            continue
                         dist = ti.sqrt((xc - i) ** 2 + (yc - j) ** 2 + (zc - k) ** 2)
                         if dist <= kernel_support:
-                            w_raw = self.threedelta(dist)
-                            if self.CT[i, j, k] & (CellType.OBSTACLE | CellType.VEL_LADD | CellType.FREE_SLIP):
-                                boundary_weight_sum += w_raw
-                            else:
-                                valid_weight_sum += w_raw
+                            valid_weight_sum += self.threedelta(dist)
 
-            total_weight = valid_weight_sum + boundary_weight_sum
-            correction_factor = 1.0
+            inv_weight_sum = 0.0
             if valid_weight_sum > 1e-10:
-                correction_factor = total_weight / valid_weight_sum
+                inv_weight_sum = 1.0 / valid_weight_sum
 
             # Second pass: update both volume fraction and hydrodynamic force
             V_grain = 4.0 / 3.0 * tm.pi * self.dem.gf[grain_id].radius ** 3
@@ -550,17 +546,17 @@ class Unresolvedlattice3D(BasicLattice3D):
                             continue
                         dist = ti.sqrt((xc - i) ** 2 + (yc - j) ** 2 + (zc - k) ** 2)
                         if dist <= kernel_support:
-                            w_raw = self.threedelta(dist)
-                            if w_raw > 1e-10:
-                                w_corrected = w_raw * correction_factor
+                            w = self.threedelta(dist)
+                            if w > 1e-10 and inv_weight_sum > 0:
+                                w_norm = w * inv_weight_sum
 
                                 # Accumulate solid volume fraction (dimensionless)
-                                ti.atomic_add(self.volfrac[i, j, k], w_corrected * V_grain / V_cell)
+                                ti.atomic_add(self.volfrac[i, j, k], w_norm * V_grain / V_cell)
 
                                 # Accumulate hydrodynamic force source term with unit scaling
                                 ti.atomic_add(self.hydroforce[i, j, k],
-                                              w_corrected * fluid_force * self.unit.dt ** 2 / (
-                                                          self.unit.rho * self.unit.dx))
+                                              w_norm * fluid_force * self.unit.dt ** 2 / (
+                                                          self.unit.rho * self.unit.dx **4))
 
 
     # =====================================
@@ -665,7 +661,7 @@ class Unresolvedlattice3D(BasicLattice3D):
         elif r <= 1.5:
             x = -3.0 * (1.0 - r) ** 2 + 1.0
             a = (5.0 - 3.0 * r - ti.sqrt(x)) / 6.0
-        
+
         return a
 
     '''
