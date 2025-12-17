@@ -135,6 +135,17 @@ class BasicLattice3D:
 
         # unit converter
         self.unit = UnitConverter(dx, dt, rho)
+        # stress tensor components (NEW)
+        self.stress_xx = ti.field(float, shape=(Nx, Ny, Nz))  # normal stress in xx
+        self.stress_yy = ti.field(float, shape=(Nx, Ny, Nz))  # normal stress in yy
+        self.stress_zz = ti.field(float, shape=(Nx, Ny, Nz))  # normal stress in zz
+        self.stress_xy = ti.field(float, shape=(Nx, Ny, Nz))  # shear stress in xy
+        self.stress_xz = ti.field(float, shape=(Nx, Ny, Nz))  # shear stress in xz
+        self.stress_yz = ti.field(float, shape=(Nx, Ny, Nz))  # shear stress in yz
+
+        # derived stress quantities (NEW)
+        self.shear_stress_mag = ti.field(float, shape=(Nx, Ny, Nz))  # magnitude of shear stress
+
 
     # ===============================================#
     # ----- Initialize Distribution Functions ----- #
@@ -319,6 +330,113 @@ class BasicLattice3D:
 
         return iNext, jNext, kNext
 
+    # ================================================#
+    # ----- NEW: Compute Stress Tensor ----- #
+    # ================================================#
+    @ti.kernel
+    def compute_stress(self):
+        """Compute the stress tensor components using non-equilibrium distribution.
+
+        The stress tensor is calculated as:
+        σ_αβ = -(1 - ω*Δt/2) * Σ_i c_iα * c_iβ * (f_i - f_i^eq)
+
+        For dimensionless LBM with Δt = 1:
+        σ_αβ = -(1 - ω/2) * Σ_i c_iα * c_iβ * (f_i - f_i^eq)
+        """
+        for i, j, k in ti.ndrange(self.Nx, self.Ny, self.Nz):
+            # skip non-fluid cells
+            if self.CT[i, j, k] & (CellType.OBSTACLE | CellType.VEL_LADD | CellType.FREE_SLIP):
+                continue
+
+            # relaxation factor: (1 - ω/2) for Δt = 1
+            relax_factor = 1.0 - 0.5 * self.omega[i, j, k]
+
+            # initialize stress components
+            sxx = 0.0
+            syy = 0.0
+            szz = 0.0
+            sxy = 0.0
+            sxz = 0.0
+            syz = 0.0
+
+            # sum over all directions
+            for q in range(BasicLattice3D.Q):
+                # non-equilibrium distribution
+                fneq = self.f[i, j, k][q] - self.feq[i, j, k][q]
+
+                # lattice velocity components
+                cx = BasicLattice3D.c[q].x
+                cy = BasicLattice3D.c[q].y
+                cz = BasicLattice3D.c[q].z
+
+                # accumulate stress tensor components
+                sxx += cx * cx * fneq
+                syy += cy * cy * fneq
+                szz += cz * cz * fneq
+                sxy += cx * cy * fneq
+                sxz += cx * cz * fneq
+                syz += cy * cz * fneq
+
+            # apply relaxation factor and negative sign
+            self.stress_xx[i, j, k] = -relax_factor * sxx
+            self.stress_yy[i, j, k] = -relax_factor * syy
+            self.stress_zz[i, j, k] = -relax_factor * szz
+            self.stress_xy[i, j, k] = -relax_factor * sxy
+            self.stress_xz[i, j, k] = -relax_factor * sxz
+            self.stress_yz[i, j, k] = -relax_factor * syz
+
+            # compute shear stress magnitude (von Mises equivalent shear stress)
+            # τ_eq = sqrt(0.5 * (τ_xy² + τ_xz² + τ_yz²))
+            self.shear_stress_mag[i, j, k] = tm.sqrt(
+                0.5 * (self.stress_xy[i, j, k] ** 2 +
+                       self.stress_xz[i, j, k] ** 2 +
+                       self.stress_yz[i, j, k] ** 2)
+            )
+
+    @ti.kernel
+    def compute_plane_average_stress(self, axis: int, position: int) -> tuple[float, float, float]:
+        """计算特定平面上的平均剪切应力
+
+        Args:
+            axis: 0=x轴(yz平面), 1=y轴(xz平面), 2=z轴(xy平面)
+            position: 沿该轴的位置索引
+
+        Returns:
+            tuple: (avg_τ_xy, avg_τ_xz, avg_τ_yz) 该平面的平均剪切应力
+        """
+        sum_xy = 0.0
+        sum_xz = 0.0
+        sum_yz = 0.0
+        count = 0
+
+        if axis == 2:  # xy平面 (固定z)
+            for i, j in ti.ndrange(self.Nx, self.Ny):
+                if self.CT[i, j, position] & CellType.FLUID:
+                    sum_xy += self.stress_xy[i, j, position]
+                    sum_xz += self.stress_xz[i, j, position]
+                    sum_yz += self.stress_yz[i, j, position]
+                    count += 1
+
+        elif axis == 1:  # xz平面 (固定y)
+            for i, k in ti.ndrange(self.Nx, self.Nz):
+                if self.CT[i, position, k] & CellType.FLUID:
+                    sum_xy += self.stress_xy[i, position, k]
+                    sum_xz += self.stress_xz[i, position, k]
+                    sum_yz += self.stress_yz[i, position, k]
+                    count += 1
+
+        elif axis == 0:  # yz平面 (固定x)
+            for j, k in ti.ndrange(self.Ny, self.Nz):
+                if self.CT[position, j, k] & CellType.FLUID:
+                    sum_xy += self.stress_xy[position, j, k]
+                    sum_xz += self.stress_xz[position, j, k]
+                    sum_yz += self.stress_yz[position, j, k]
+                    count += 1
+
+        if count > 0:
+            return (sum_xy / count, sum_xz / count, sum_yz / count)
+        else:
+            return (0.0, 0.0, 0.0)
     # ===========================================#
     # ----- Compute Strain Rate Magnitude ----- #
     # ===========================================#
