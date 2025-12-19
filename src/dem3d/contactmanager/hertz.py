@@ -47,8 +47,8 @@ class HertzMindlinContactModel(ContactModel):
 
         mf = ti.static(self.mf)
         gap = -1 * delta_n
-        type_i: int = gf[i].materialType
-        type_j: int = gf[j].materialType
+        type_i: ti.i32 = gf[i].materialType
+        type_j: ti.i32 = gf[j].materialType
         Y_star = 1.0 / ((1.0 - mf[type_i].poissonRatio ** 2) / mf[type_i].elasticModulus + (
                 1.0 - mf[type_j].poissonRatio ** 2) / mf[type_j].elasticModulus)
         G_star = 1.0 / (2.0 * (2.0 - mf[type_i].poissonRatio) * (1.0 + mf[type_i].poissonRatio) / mf[
@@ -84,7 +84,7 @@ class HertzMindlinContactModel(ContactModel):
 
         try_shear_force = - k_t * cf[offset].shear_displacement
         if tm.length(try_shear_force) >= mu * F[0]:  # Sliding
-            ratio: float = mu * F[0] / tm.length(try_shear_force)
+            ratio: ti.f64 = mu * F[0] / tm.length(try_shear_force)
             F[1] = try_shear_force[1] * ratio
             F[2] = try_shear_force[2] * ratio
             cf[offset].shear_displacement[1] = -F[1] / k_t
@@ -101,8 +101,8 @@ class HertzMindlinContactModel(ContactModel):
 
         mf = ti.static(self.mf)
         # Reference: https://www.cfdem.com/media/DEM/docu/gran_model_hertz.html
-        type_i: int = gf[i].materialType
-        type_j: int = wf[j].materialType
+        type_i: ti.i32 = gf[i].materialType
+        type_j: ti.i32 = wf[j].materialType
 
         gap = -1 * delta_n
         Y_star = 1.0 / ((1.0 - mf[type_i].poissonRatio ** 2) / mf[type_i].elasticModulus +

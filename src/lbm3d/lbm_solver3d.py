@@ -394,7 +394,7 @@ class BasicLattice3D:
             )
 
     @ti.kernel
-    def compute_plane_average_stress(self, axis: int, position: int) -> tuple[float, float, float]:
+    def compute_plane_average_stress(self, axis: int, position: int) -> ti.types.vector(3, float):
         """计算特定平面上的平均剪切应力
 
         Args:
@@ -402,7 +402,7 @@ class BasicLattice3D:
             position: 沿该轴的位置索引
 
         Returns:
-            tuple: (avg_τ_xy, avg_τ_xz, avg_τ_yz) 该平面的平均剪切应力
+            ti.math.vec3: (avg_τ_xy, avg_τ_xz, avg_τ_yz) 该平面的平均剪切应力
         """
         sum_xy = 0.0
         sum_xz = 0.0
@@ -433,10 +433,16 @@ class BasicLattice3D:
                     sum_yz += self.stress_yz[position, j, k]
                     count += 1
 
+        # 计算平均值，避免除以0
+        avg_xy = 0.0
+        avg_xz = 0.0
+        avg_yz = 0.0
         if count > 0:
-            return (sum_xy / count, sum_xz / count, sum_yz / count)
-        else:
-            return (0.0, 0.0, 0.0)
+            avg_xy = sum_xy / count
+            avg_xz = sum_xz / count
+            avg_yz = sum_yz / count
+
+        return Vector3(avg_xy, avg_xz, avg_yz)
     # ===========================================#
     # ----- Compute Strain Rate Magnitude ----- #
     # ===========================================#

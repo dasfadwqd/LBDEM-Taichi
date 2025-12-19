@@ -234,10 +234,10 @@ class DEMSolver:
         self.mf[1].coefficientRestitution = getattr(contact_model, 'pw_restitution', 0.7)
 
         # Linear contact
-        self.mf[0].stiffness_normal = contact_model.stiffness_normal
-        self.mf[0].stiffness_tangent = contact_model.stiffness_tangential
-        self.mf[0].dp_nratio = contact_model.damping_normal
-        self.mf[0].dp_tratio = contact_model.damping_tangential
+        #self.mf[0].stiffness_normal = contact_model.stiffness_normal
+        #self.mf[0].stiffness_tangent = contact_model.stiffness_tangential
+        #self.mf[0].dp_nratio = contact_model.damping_normal
+        #self.mf[0].dp_tratio = contact_model.damping_tangential
 
 
 
