@@ -29,27 +29,27 @@ Vector3i = ti.types.vector(3, int)
 # Simulation Constants
 # =====================================
 # Domain boundaries
-xmin, xmax = 0, 0.1  # Domain boundaries in x-direction
-ymin, ymax = 0, 0.1  # Domain boundaries in y-direction
-zmin, zmax = 0, 0.159  # Domain boundaries in z-direction
+xmin, xmax = 0, 0.01  # Domain boundaries in x-direction
+ymin, ymax = 0, 0.005  # Domain boundaries in y-direction
+zmin, zmax = 0, 0.005  # Domain boundaries in z-direction
 
 # Physical properties
-grav = Vector3(0.0, 0.0, -9.81)  # Gravitational acceleration (m/s²)
-dt = 1e-6  # Time step size (seconds)
+grav = Vector3(1.0, 0.0, -5)  # Gravitational acceleration (m/s²)
+dt = 1e-7  # Time step size (seconds)
 target_time = 0.5  # Total simulation time (seconds)
-saving_interval_time = 0.05  # Time interval between saved frames (seconds)
+saving_interval_time = 0.01  # Time interval between saved frames (seconds)
 
 domain = DomainBounds(xmin , xmax,
                       ymin , ymax,
                       zmin , zmax)
 
-contact_model = LinearContactConfig(
-    stiffness_normal = 108e6 ,
-    stiffness_tangential= 88.94e6,
-    damping_normal=0.1,
-    damping_tangential=0.1,
-    pp_friction=0.2,
-    pw_friction=0.2)
+contact_model = HertzContactConfig(
+                pp_friction=0.0,
+                pw_friction=0.0,
+                pp_restitution=1.0,
+                pw_restitution=1.0
+
+                )
 
 
 
@@ -69,11 +69,12 @@ def main():
     )
 
     config.set_particle_properties(
-        elastic_modulus=1e8,
-        poisson_ratio=0.3
+        elastic_modulus=7e10,
+        poisson_ratio=0.3,
+        max_coordinate_number = 64
     )
     config.set_wall_properties(
-        elastic_modulus=1e8,
+        elastic_modulus=7e10,
         poisson_ratio=0.3
     )
 
@@ -84,7 +85,7 @@ def main():
     domain_max = Vector3(xmax , ymax ,zmax)
     solver = DEMSolver(config)
     solver.init_particle_fields(particle_init, domain_min, domain_max)
-    solver.set_contact_model("linear")
+    solver.set_contact_model("hertz")
 
     print(config.summary())
 

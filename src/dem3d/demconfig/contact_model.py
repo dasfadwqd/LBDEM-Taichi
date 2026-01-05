@@ -22,12 +22,12 @@ class ContactModelConfig(ABC):
 @dataclass
 class LinearContactConfig(ContactModelConfig):
     """Linear spring-dashpot contact model."""
-    stiffness_normal: float = 1e9
-    stiffness_tangential: float = 1e9
-    damping_normal: float = 0.5
-    damping_tangential: float = 0.5
-    pp_friction: float = 0.3
-    pw_friction: float = 0.35
+    stiffness_normal: float
+    stiffness_tangential: float
+    damping_normal: float
+    damping_tangential: float
+    pp_friction: float
+    pw_friction: float
 
 
     def get_model_name(self) -> str:
@@ -45,10 +45,10 @@ class LinearContactConfig(ContactModelConfig):
 @dataclass
 class HertzContactConfig(ContactModelConfig):
     """Hertz-Mindlin contact model."""
-    pp_friction: float = 0.3
-    pw_friction: float = 0.35
-    pp_restitution: float = 0.9
-    pw_restitution: float = 0.7
+    pp_friction: float
+    pw_friction: float
+    pp_restitution: float
+    pw_restitution: float
 
 
     def get_model_name(self) -> str:

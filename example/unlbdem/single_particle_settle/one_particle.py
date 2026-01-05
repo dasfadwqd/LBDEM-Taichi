@@ -82,7 +82,7 @@ Nz =  int(lz / dx) +1  # number of lattice nodes in y-direction
 x = np.arange(Nx) * dx - 0.5 * dx  # x-coordinates [m]
 y = np.arange(Ny) * dx - 0.5 * dx  # y-coordinates [m]
 z = np.arange(Nz) * dx - 0.5 * dx  # z-coordinates [m]
-case_id = 'case2'
+case_id = 'case4'
 
 params = CASES[case_id]
 # fluid properties
@@ -111,7 +111,7 @@ dtLBM = (dx ** 2) / (nu / nuLU)  # time step [s]
 
 # iterations
 step = 0  # number of cycles
-total_time = 4.0
+total_time = 5.0
 totalSteps = round(total_time / dtLBM)  # total number of time step
 logSteps = round(0.05 / dtLBM)  # print log info every 'logSteps' steps
 subCycles = 10  # number of sub-cycles (no influence if no collision!)

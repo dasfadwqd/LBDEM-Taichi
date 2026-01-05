@@ -58,7 +58,7 @@ class HertzMindlinContactModel(ContactModel):
         rho = gf[i].mass * 3 / (4 * tm.pi* gf[i].radius ** 3)
         t = self.min_time(R_star,rho , G_star , mf[type_i].poissonRatio)
         if dt > t:
-            print(f"Time Warning!  {dt:.6f}> {t:.6f}")
+            print(f"Time Warning!  {dt:.6f}> {t:.8f}")
         m_star = 1.0 / (1.0 / gf[i].mass + 1.0 / gf[j].mass)
         # Restitution and friction coefficients
         e = 0.5 * (mf[type_i].coefficientRestitution + mf[type_j].coefficientRestitution)
