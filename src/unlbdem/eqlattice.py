@@ -18,6 +18,9 @@ from src.lbm3d.lbmutils import CellType
 # DEM module - Discrete Element Method components
 from src.dem3d.demsolver import DEMSolver
 
+from src.unlbdem.utils import Interpolation
+
+
 # =====================================
 # Type Definitions
 # =====================================
@@ -85,9 +88,9 @@ class EqIMBlattice3D(BasicLattice3D):
         # Equilibrium distribution based on solid velocity
         self.feqsolid = ti.Vector.field(EqIMBlattice3D.Q, float, shape=(Nx, Ny, Nz))
 
-        self.weight_sum = ti.field(float,  shape=(Nx, Ny, Nz))  # Sum of assigned weight coefficients
+        self.weight_sum = ti.field(float,  shape=(Nx, Ny, Nz))  # Sum of weight coefficients
 
-        self.velsum = ti.Vector.field(EqIMBlattice3D.Q, float, shape=(Nx, Ny, Nz))  # Sum of solid velocities
+        self.velsum = ti.Vector.field(EqIMBlattice3D.D, float, shape=(Nx, Ny, Nz))  # Sum of solid velocities
 
         # Store reference to DEM solver for data exchange
         self.dem = demslover
@@ -122,12 +125,12 @@ class EqIMBlattice3D(BasicLattice3D):
         self.grains2lattice()
 
     # =====================================
-    # Map Grains to Lattice (Area-Weighted)
+    # Map Grains to Lattice (Kernel function weight)
     # =====================================
     @ti.func
     def grains2lattice(self):
         """
-        Map DEM grain data to Eulerian lattice using area-weighted interpolation.
+        Map DEM grain data to Eulerian lattice using Kernel function weight interpolation.
 
         Version features:
           1. Grain-first traversal: iterate grains, then affected lattice nodes.
@@ -141,22 +144,19 @@ class EqIMBlattice3D(BasicLattice3D):
         self.velsolid.fill(0.0)  # Final solid velocity field
         self.velsum.fill(0.0)  # Weighted velocity accumulator
         self.weight_sum.fill(0.0)  # Total interpolation weight per node
+        self.weight.fill(0.0)
 
         V_lattice = self.unit.dx ** 3  # Volume of a single lattice cell
 
         # =====================================
         # Traverse All Lattice
         # =====================================
-        for i, j, k in ti.ndrange(self.Nx , self.Ny , self.Nz):
-            # skip the boundary nodes
-            if self.CT[i, j, k] & (CellType.OBSTACLE | CellType.VEL_LADD | CellType.FREE_SLIP):
-                continue
-            for id in range(self.dem.gf.shape[0]):
-                # Convert grain position and radius to lattice units
-                xc = (self.dem.gf[id].position[0] - self.dem.config.domain.xmin + 0.5 * self.unit.dx) / self.unit.dx
-                yc = (self.dem.gf[id].position[1] - self.dem.config.domain.ymin + 0.5 * self.unit.dx) / self.unit.dx
-                zc = (self.dem.gf[id].position[2] - self.dem.config.domain.zmin + 0.5 * self.unit.dx) / self.unit.dx
-                r = self.dem.gf[id].radius / self.unit.dx
+        for id in ti.ndrange(self.dem.gf.shape[0]):
+            # Convert grain position and radius to lattice units
+            xc = (self.dem.gf[id].position[0] - self.dem.config.domain.xmin + 0.5 * self.unit.dx) / self.unit.dx
+            yc = (self.dem.gf[id].position[1] - self.dem.config.domain.ymin + 0.5 * self.unit.dx) / self.unit.dx
+            zc = (self.dem.gf[id].position[2] - self.dem.config.domain.zmin + 0.5 * self.unit.dx) / self.unit.dx
+            r = self.dem.gf[id].radius / self.unit.dx
 
                 V_grain = 4.0 / 3.0 * tm.pi * self.dem.gf[id].radius ** 3
                 vel_lattice = self.dem.gf[id].velocity * self.unit.dt / self.unit.dx
@@ -165,17 +165,28 @@ class EqIMBlattice3D(BasicLattice3D):
                 weight = self.threedelta(dist)
                 volume_contribution = weight * V_grain / V_lattice
 
-                self.volfrac[i, j, k] += volume_contribution
-                if self.volfrac[i, j, k] > 1.0:
-                    print(f"WARNING at ({i},{j},{k}): Volume fraction = {self.volfrac[i, j, k]}")
-                    self.volfrac[i, j, k] = 1.0  # Clamp to maximum physical value
-                self.velsum[i, j, k] += weight * vel_lattice
-                self.weight_sum[i, j, k] += weight
+                        dist = ti.sqrt((xc - i) ** 2 + (yc - j) ** 2 + (zc - k) ** 2)
+                        weight = self.threedelta(dist)
+                        normalized_weight = weight * normalization_factor
 
-                if self.weight_sum[i, j, k] > 1e-10:
-                    self.velsolid[i, j, k] = self.velsum[i, j, k] / self.weight_sum[i, j, k]
+                        volume_contribution = normalized_weight * V_grain / V_lattice
 
+                        ti.atomic_add(self.volfrac[i, j, k], volume_contribution)
+                        ti.atomic_add(self.weight_sum[i, j, k], normalized_weight)
+                        ti.atomic_add(self.velsum[i, j, k], normalized_weight * vel_lattice)
 
+        # =====================================
+        # Finalize Solid Velocity Field
+        # =====================================
+        for i, j, k in ti.ndrange(self.Nx, self.Ny, self.Nz):
+            # Compute weighted average velocity
+            if self.weight_sum[i, j, k] > 1e-10:
+                self.velsolid[i, j, k] = self.velsum[i, j, k] / self.weight_sum[i, j, k]
+
+            # Enforce physical bounds on volume fraction
+            if self.volfrac[i, j, k] > 1.0:
+                print(f"WARNING at ({i},{j},{k}): Volume fraction = {self.volfrac[i, j, k]}")
+                self.volfrac[i, j, k] = 1.0  # Clamp to maximum physical value
             # calculate the weighting coefficient
             self.compute_weight(i, j, k)
 
@@ -347,6 +358,7 @@ class EqIMBlattice3D(BasicLattice3D):
           4. Accumulate force on grain.
         """
         self.dem.gf.force_fluid.fill(0.0)
+
 
         for id in ti.ndrange(self.dem.gf.shape[0]):
             # Convert grain position to lattice coordinates
