@@ -435,8 +435,6 @@ class Unresolvedlattice3D(BasicLattice3D):
         fvf = 1.0 - self.volfrac[i, j, k]
         self.vel[i, j, k] = self.vel[i, j, k] / (fvf * self.rho[i, j, k])
 
-
-
         # Optional: check velocity magnitude
         if tm.dot(self.vel[i, j, k], self.vel[i, j, k]) ** 0.5 > BasicLattice3D.velmax:
             print(f"Warning: Velocity too large at ({i}, {j}, {k})")
