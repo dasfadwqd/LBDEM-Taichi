@@ -149,80 +149,36 @@ class EqIMBlattice3D(BasicLattice3D):
         V_lattice = self.unit.dx ** 3  # Volume of a single lattice cell
 
         # =====================================
-        # Traverse All Grains
-        # =====================================
-        for id in ti.ndrange(self.dem.gf.shape[0]):
-            # Convert grain position and radius to lattice units
-            xc = (self.dem.gf[id].position[0] - self.dem.config.domain.xmin + 0.5 * self.unit.dx) / self.unit.dx
-            yc = (self.dem.gf[id].position[1] - self.dem.config.domain.ymin + 0.5 * self.unit.dx) / self.unit.dx
-            zc = (self.dem.gf[id].position[2] - self.dem.config.domain.zmin + 0.5 * self.unit.dx) / self.unit.dx
-            r = self.dem.gf[id].radius / self.unit.dx
-
-            V_grain = 4.0 / 3.0 * tm.pi * self.dem.gf[id].radius ** 3
-            vel_lattice = self.dem.gf[id].velocity * self.unit.dt / self.unit.dx
-
-            # Determine affected lattice range (within 1.5 cells from center)
-            i_min = ti.max(0, int(ti.floor(xc - 1.5)))
-            i_max = ti.min(self.Nx - 1, int(ti.ceil(xc + 1.5)))
-            j_min = ti.max(0, int(ti.floor(yc - 1.5)))
-            j_max = ti.min(self.Ny - 1, int(ti.ceil(yc + 1.5)))
-            k_min = ti.max(0, int(ti.floor(zc - 1.5)))
-            k_max = ti.min(self.Nz - 1, int(ti.ceil(zc + 1.5)))
-
-            # =====================================
-            # Compute Normalization Factor
-            # =====================================
-            total_weight = 0.0
-            valid_weight = 0.0
-
-            for i in range(i_min, i_max + 1):
-                for j in range(j_min, j_max + 1):
-                    for k in range(k_min, k_max + 1):
-                        # Distance from lattice node center to grain center
-                        dist = ti.sqrt((xc - i) ** 2 + (yc - j) ** 2 + (zc - k) ** 2)
-                        weight = self.threedelta(dist)
-                        total_weight += weight
-
-                        # Only include nodes not marked as boundary types
-                        if not (self.CT[i, j, k] & (CellType.OBSTACLE | CellType.VEL_LADD | CellType.FREE_SLIP)):
-                            valid_weight += weight
-
-            normalization_factor = 1.0
-            if valid_weight > 1e-10:
-                normalization_factor = total_weight / valid_weight
-
-            # =====================================
-            # Distribute Grain Contribution
-            # =====================================
-            for i in range(i_min, i_max + 1):
-                for j in range(j_min, j_max + 1):
-                    for k in range(k_min, k_max + 1):
-                        # Skip boundary nodes
-                        if self.CT[i, j, k] & (CellType.OBSTACLE | CellType.VEL_LADD | CellType.FREE_SLIP):
-                            continue
-
-                        dist = ti.sqrt((xc - i) ** 2 + (yc - j) ** 2 + (zc - k) ** 2)
-                        weight = self.threedelta(dist)
-                        normalized_weight = weight * normalization_factor
-
-                        volume_contribution = normalized_weight * V_grain / V_lattice
-
-                        ti.atomic_add(self.volfrac[i, j, k], volume_contribution)
-                        ti.atomic_add(self.weight_sum[i, j, k], normalized_weight)
-                        ti.atomic_add(self.velsum[i, j, k], normalized_weight * vel_lattice)
-
-        # =====================================
-        # Finalize Solid Velocity Field
+        # Traverse All Lattice
         # =====================================
         for i, j, k in ti.ndrange(self.Nx, self.Ny, self.Nz):
-            # Compute weighted average velocity
-            if self.weight_sum[i, j, k] > 1e-10:
-                self.velsolid[i, j, k] = self.velsum[i, j, k] / self.weight_sum[i, j, k]
+            # skip the boundary nodes
+            if self.CT[i, j, k] & (CellType.OBSTACLE | CellType.VEL_LADD | CellType.FREE_SLIP):
+                continue
+            for id in range(self.dem.gf.shape[0]):
+                # Convert grain position and radius to lattice units
+                xc = (self.dem.gf[id].position[0] - self.dem.config.domain.xmin + 0.5 * self.unit.dx) / self.unit.dx
+                yc = (self.dem.gf[id].position[1] - self.dem.config.domain.ymin + 0.5 * self.unit.dx) / self.unit.dx
+                zc = (self.dem.gf[id].position[2] - self.dem.config.domain.zmin + 0.5 * self.unit.dx) / self.unit.dx
+                r = self.dem.gf[id].radius / self.unit.dx
 
-            # Enforce physical bounds on volume fraction
-            if self.volfrac[i, j, k] > 1.0:
-                print(f"WARNING at ({i},{j},{k}): Volume fraction = {self.volfrac[i, j, k]}")
-                self.volfrac[i, j, k] = 1.0  # Clamp to maximum physical value
+                V_grain = 4.0 / 3.0 * tm.pi * self.dem.gf[id].radius ** 3
+                vel_lattice = self.dem.gf[id].velocity * self.unit.dt / self.unit.dx
+
+                dist = ti.sqrt((xc - i) ** 2 + (yc - j) ** 2 + (zc - k) ** 2)
+                weight = self.threedelta(dist)
+                volume_contribution = weight * V_grain / V_lattice
+
+                self.volfrac[i, j, k] += volume_contribution
+                if self.volfrac[i, j, k] > 1.0:
+                    print(f"WARNING at ({i},{j},{k}): Volume fraction = {self.volfrac[i, j, k]}")
+                    self.volfrac[i, j, k] = 1.0  # Clamp to maximum physical value
+                self.velsum[i, j, k] += weight * vel_lattice
+                self.weight_sum[i, j, k] += weight
+
+                if self.weight_sum[i, j, k] > 1e-10:
+                    self.velsolid[i, j, k] = self.velsum[i, j, k] / self.weight_sum[i, j, k]
+
             # calculate the weighting coefficient
             self.compute_weight(i, j, k)
 
