@@ -121,8 +121,6 @@ class EqIMBlattice3D(BasicLattice3D):
             for q in ti.static(range(EqIMBlattice3D.Q)):
                 self.f[i, j, k][q] = self.feq[i, j, k][q]
 
-        # map grains to lattice in case the initial state needs to be saved
-        self.grains2lattice()
 
     # =====================================
     # Map Grains to Lattice (Kernel function weight)
@@ -144,7 +142,7 @@ class EqIMBlattice3D(BasicLattice3D):
         self.velsolid.fill(0.0)  # Final solid velocity field
         self.velsum.fill(0.0)  # Weighted velocity accumulator
         self.weight_sum.fill(0.0)  # Total interpolation weight per node
-        self.weight.fill(0.0)
+
 
         V_lattice = self.unit.dx ** 3  # Volume of a single lattice cell
 
@@ -170,24 +168,26 @@ class EqIMBlattice3D(BasicLattice3D):
                 volume_contribution = weight * V_grain / V_lattice
 
                 self.volfrac[i, j, k] += volume_contribution
+
                 if self.volfrac[i, j, k] > 1.0:
                     print(f"WARNING at ({i},{j},{k}): Volume fraction = {self.volfrac[i, j, k]}")
                     self.volfrac[i, j, k] = 1.0  # Clamp to maximum physical value
                 self.velsum[i, j, k] += weight * vel_lattice
                 self.weight_sum[i, j, k] += weight
 
-                if self.weight_sum[i, j, k] > 1e-10:
-                    self.velsolid[i, j, k] = self.velsum[i, j, k] / self.weight_sum[i, j, k]
 
-            # calculate the weighting coefficient
-            self.compute_weight(i, j, k)
+            if self.weight_sum[i, j, k] > 0:
+                self.velsolid[i, j, k] = self.velsum[i, j, k] / self.weight_sum[i, j, k]
+
+
+
 
     # ==========================================#
     # ----- Calculate Weight Coefficient ----- #
     # ==========================================#
 
-    @ti.func
-    def compute_weight(self, i: int, j: int, k: int):
+    @ti.kernel
+    def compute_weight(self):
         """Calculates the weighting coefficient 。
 
         Args:
@@ -196,11 +196,16 @@ class EqIMBlattice3D(BasicLattice3D):
             k (int): Index of z-coordinate.
         """
 
-        V_lattice = self.unit.dx ** 3  # Volume of a single lattice cell
-        R_lattice = ti.pow( 3 * V_lattice * self.volfrac[i ,j ,k ] / (4.0 * ti.math.pi) , 1 / 3)
-        vel_lattice = self.velsolid[i, j, k] * self.unit.dx / self.unit.dt
+        for i, j, k in ti.ndrange(self.Nx, self.Ny, self.Nz):
+            # skip the boundary nodes
+            if self.CT[i, j, k] & (CellType.OBSTACLE | CellType.VEL_LADD | CellType.FREE_SLIP):
+                continue
+            if self.volfrac[i ,j,k] > 0:
+                V_lattice = self.unit.dx ** 3  # Volume of a single lattice cell
+                R_lattice = ti.pow( 3 * V_lattice * self.volfrac[i ,j ,k ] / (4.0 * ti.math.pi) , 1/3)
 
-        v_slip = vel_lattice - self.vel[i ,j ,k] * self.unit.dx / self.unit.dt
+
+                v_slip = (self.velsolid[i, j, k] - self.vel[i ,j ,k]) * self.unit.dx / self.unit.dt
 
                 # Calculate the equivalent drag force
                 F_d = self.compute_drag_force( 2.0 * R_lattice, v_slip, self.volfrac[i ,j ,k])
@@ -315,10 +320,6 @@ class EqIMBlattice3D(BasicLattice3D):
           2. For each fluid/solid cell, apply appropriate collision.
           3. Accumulate hydrodynamic forces on grains.
         """
-        # =====================================
-        # Map Grains to Lattice
-        # =====================================
-        self.grains2lattice()
 
         # =====================================
         # Cell-wise Collision
@@ -332,15 +333,12 @@ class EqIMBlattice3D(BasicLattice3D):
             self.compute_feq(i, j, k)
 
             # Apply collision based on local solid fraction
-            if self.volfrac[i, j, k] > 0.0:
+            if self.volfrac[i, j, k] > 0.:
                 self.collide_solid(i, j, k)  # solid-influenced collision
             else:
                 self.collide_fluid(i, j, k)  # pure fluid BGK
 
-        # =====================================
-        # Compute Hydrodynamic Forces on Grains
-        # =====================================
-        self.lattice2grains()
+
 
     # =====================================
     # Fluid-Only Collision (BGK)
@@ -380,6 +378,7 @@ class EqIMBlattice3D(BasicLattice3D):
         # Apply weighted collision
         for q in ti.static(range(EqIMBlattice3D.Q)):
             # Solid momentum exchange term
+
             Omega_s = (
                     self.f[i, j, k][EqIMBlattice3D.qinv[q]]
                     - self.feq[i, j, k][EqIMBlattice3D.qinv[q]]
@@ -419,11 +418,12 @@ class EqIMBlattice3D(BasicLattice3D):
             self.feqsolid[i, j, k][q] = EqIMBlattice3D.w[q] * self.rho[i, j, k] * (
                     1.0 + 3.0 * cu + 4.5 * cu * cu - 1.5 * uv
             )
+            #print(self.feqsolid[i, j, k][q])
 
     # =====================================
     # Interpolate Fluid Forces to Grains
     # =====================================
-    @ti.func
+    @ti.kernel
     def lattice2grains(self):
         """
         Interpolate hydrodynamic force from lattice to DEM grains.
