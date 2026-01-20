@@ -7,7 +7,7 @@ import math
 
 from .utils import *
 from ..bpcd import BPCD
-from ..demconfig import DEMSolverConfig
+from ..demconfig import DEMSolverConfig, HertzContactConfig, LinearContactConfig
 from ..dateclass import Grain, Material, Wall, Contact
 from ..contactmanager import ContactModel, HertzMindlinContactModel, LinearContactModel
 
@@ -219,54 +219,134 @@ class DEMSolver:
             self.wf[j].materialType = 1;  # Hard coding
 
         contact_model = self.config.contact_model
-        # Material properties
-        # Particle material
-        self.mf[0].density = material_density
+        # ========================================
+        # Material Properties Assignment
+        # ========================================
+
+        # --- Particle Material (index 0) ---
+        self.mf[0].density = material_density  # Use density from file
         self.mf[0].elasticModulus = self.config.particle_props.elastic_modulus
         self.mf[0].poissonRatio = self.config.particle_props.poisson_ratio
-        self.mf[0].coefficientFriction = getattr(contact_model, 'pp_friction', 0.3)
-        self.mf[0].coefficientRestitution = getattr(contact_model, 'pp_restitution', 0.9)
 
+        # --- Wall Material (index 1) ---
         self.mf[1].density = self.config.wall_props.density
         self.mf[1].elasticModulus = self.config.wall_props.elastic_modulus
         self.mf[1].poissonRatio = self.config.wall_props.poisson_ratio
-        self.mf[1].coefficientFriction = getattr(contact_model, 'pw_friction', 0.35)
-        self.mf[1].coefficientRestitution = getattr(contact_model, 'pw_restitution', 0.7)
 
-        # Linear contact
-        #self.mf[0].stiffness_normal = contact_model.stiffness_normal
-        #self.mf[0].stiffness_tangent = contact_model.stiffness_tangential
-        #self.mf[0].dp_nratio = contact_model.damping_normal
-        #self.mf[0].dp_tratio = contact_model.damping_tangential
+        # ========================================
+        # Contact Model Specific Parameters
+        # ========================================
 
 
 
-        # Setup collision detection
+        if isinstance(contact_model, LinearContactConfig):
+            # ===== Linear Contact Model =====
+            print("Setting up Linear contact model parameters...")
+
+            # Stiffness parameters
+            self.mf[0].stiffness_normal = contact_model.stiffness_normal
+            self.mf[0].stiffness_tangent = contact_model.stiffness_tangential
+
+            # Damping parameters
+            self.mf[0].dp_nratio = contact_model.damping_normal
+            self.mf[0].dp_tratio = contact_model.damping_tangential
+
+            # Friction coefficients
+            self.mf[0].coefficientFriction = contact_model.pp_friction  # Particle-Particle
+            self.mf[1].coefficientFriction = contact_model.pw_friction  # Particle-Wall
+
+            # Restitution coefficients (if available)
+            self.mf[0].coefficientRestitution = getattr(contact_model, 'pp_restitution', 0.0)
+            self.mf[1].coefficientRestitution = getattr(contact_model, 'pw_restitution', 0.0)
+
+        elif isinstance(contact_model, HertzContactConfig):
+            # ===== Hertz-Mindlin Contact Model =====
+            print("Setting up Hertz-Mindlin contact model parameters...")
+
+            # Hertz model uses restitution coefficients
+            self.mf[0].coefficientRestitution = contact_model.pp_restitution  # Particle-Particle
+            self.mf[1].coefficientRestitution = contact_model.pw_restitution  # Particle-Wall
+
+            # Friction coefficients
+            self.mf[0].coefficientFriction = contact_model.pp_friction
+            self.mf[1].coefficientFriction = contact_model.pw_friction
+
+            # Hertz model does NOT use explicit stiffness - calculated from material properties
+            # The contact model itself will compute effective stiffness from:
+            # - Elastic modulus (already set above)
+            # - Poisson ratio (already set above)
+            # - Contact geometry (particle radii)
+
+            # Clear any stiffness fields if they exist (avoid confusion)
+            if hasattr(self.mf[0], 'stiffness_normal'):
+                self.mf[0].stiffness_normal = 0.0
+                self.mf[0].stiffness_tangent = 0.0
+            if hasattr(self.mf[0], 'dp_nratio'):
+                self.mf[0].dp_nratio = 0.0
+                self.mf[0].dp_tratio = 0.0
+
+        else:
+            raise ValueError(
+                f"Unknown contact model type: {type(contact_model).__name__}. "
+                f"Expected LinearContactConfig or HertzContactConfig."
+            )
+
+        # ========================================
+        # Setup Collision Detection
+        # ========================================
         self.bpcd = BPCD.create(n, max_radius, domain_min, domain_max)
+
+        # Contact pair bit array
         u1 = ti.types.quant.int(1, False)
         self.cp = ti.field(u1)
         self.cn = ti.root.dense(ti.i, round32(n * n) // 32).quant_array(
             ti.i, dimensions=32, max_num_bits=32).place(self.cp)
 
+        # Contact field
         max_contacts = self.config.particle_props.max_coordinate_number * n
         self.cf = Contact.field(shape=max_contacts)
         self.cfn = ti.field(int, shape=n)
 
-
+        print(f"Initialized {n} particles with max radius {max_radius:.6f} m")
+        print(f"Contact model: {type(contact_model).__name__}")
 
     def set_contact_model(self, model_type: str = "hertz"):
         """
-        Set the contact model type.
+        Set the contact model type for force calculations.
 
         Args:
             model_type (str): Contact model type, either "hertz" or "linear".
-"""
+                             Must match the contact model type in config.
+
+        Raises:
+            ValueError: If model_type doesn't match config.contact_model type
+        """
+
+
+        # Validate that requested model matches config
         if model_type.lower() == "hertz":
+            if not isinstance(self.config.contact_model, HertzContactConfig):
+                raise ValueError(
+                    f"Requested 'hertz' model but config uses {type(self.config.contact_model).__name__}. "
+                    f"Please use HertzContactConfig in your configuration."
+                )
             self.contact_model = HertzMindlinContactModel(self.mf)
+            print("✓ Activated Hertz-Mindlin contact model")
+
         elif model_type.lower() == "linear":
+            if not isinstance(self.config.contact_model, LinearContactConfig):
+                raise ValueError(
+                    f"Requested 'linear' model but config uses {type(self.config.contact_model).__name__}. "
+                    f"Please use LinearContactConfig in your configuration."
+                )
             self.contact_model = LinearContactModel(self.mf)
+            print("✓ Activated Linear contact model")
+
         else:
-            raise ValueError(f"Unknown contact model type: {model_type}")
+            raise ValueError(
+                f"Unknown contact model type: '{model_type}'. "
+                f"Valid options are 'hertz' or 'linear'."
+            )
 
 
     # >>> contact field utils

@@ -90,13 +90,12 @@ class PSCLattice3D(BasicLattice3D):
         self.volfrac.fill(0.0)
         self.weight.fill(0.0)
         self.velsolid.fill(0.0)
-        self.hydrotorque.fill(0.0)
+
 
         for i, j, k in ti.ndrange(self.Nx, self.Ny, self.Nz):
             # skip the boundary nodes
             if self.CT[i, j, k] & (CellType.OBSTACLE | CellType.VEL_LADD | CellType.FREE_SLIP):
                 continue
-
             # loop through all grains
             for id in range(self.dem.gf.shape[0]):
                 # convert grain position and size to lattice units
@@ -191,7 +190,7 @@ class PSCLattice3D(BasicLattice3D):
 
             fpc = f + B*Omega_s + (1-B)*Omega_f
             where Omega_s = f_inv - feq_inv + feq_solid - f
-                  Omega_f = -omega*(f - feq)
+                Omega_f = -omega*(f - feq)
         """
         # map grains to lattice
         self.grains2lattice()
@@ -214,8 +213,6 @@ class PSCLattice3D(BasicLattice3D):
             else:
                 self.collide_fluid(i, j, k)  # collision for fluid cells
 
-        # calculate hydrodynamic torques after force calculation
-        self.compute_hydrotorque()
 
         # calculate hydrodynamic forces on grains
         self.lattice2grains()
@@ -273,14 +270,8 @@ class PSCLattice3D(BasicLattice3D):
 
         This should be called after collision step when hydroforce is computed.
         """
-        # reset torque field
-        self.hydrotorque.fill(0.0)
 
         for i, j, k in ti.ndrange(self.Nx, self.Ny, self.Nz):
-            # skip boundary cells and cells without solid fraction
-            if (self.CT[i, j, k] & (CellType.OBSTACLE | CellType.VEL_LADD | CellType.FREE_SLIP)) or (
-                    self.volfrac[i, j, k] <= 0.0):
-                continue
 
             # get grain information for this cell
             grain_id = self.id[i, j, k]
@@ -295,7 +286,7 @@ class PSCLattice3D(BasicLattice3D):
 
                 # the hydroforce[i,j,k] already contains: -B_j * sum_i(Omega_i^s * c_i)
                 # so torque = B_j * (x_j - x_g) × sum_i(Omega_i^s * c_i) = -(x_j - x_g) × hydroforce[i,j,k]
-                self.hydrotorque[i, j, k] = -tm.cross(r_vec, self.hydroforce[i, j, k])
+                self.hydrotorque[i, j, k] -= tm.cross(r_vec, self.hydroforce[i, j, k])
 
     # ==============================================================#
     # ----- Calculate Local Equilibrium using Solid Velocity ----- #
@@ -344,6 +335,7 @@ class PSCLattice3D(BasicLattice3D):
             y_end = min(int(yc + r + 2), self.Ny)
             z_begin = max(int(zc - r), 0)
             z_end = min(int(zc + r + 2), self.Nz)
+            dist = Vector3(0.0, 0.0, 0.0)
 
             for i in range(x_begin, x_end):
                 for j in range(y_begin, y_end):
@@ -357,9 +349,10 @@ class PSCLattice3D(BasicLattice3D):
                             # accumulate hydrodynamic force
                             Ff = self.hydroforce[i, j, k] * (self.unit.rho * (self.unit.dx ** 4)) / (
                                         self.unit.dt ** 2)
+
                             self.dem.gf[id].force_fluid += Ff
+                            dist = Vector3( xc - i , yc - j , zc - k ) * self.unit.dx
 
                             # accumulate hydrodynamic torque (convert from lattice units to physical units)
-                            Tf = self.hydrotorque[i, j, k] * (self.unit.rho * (self.unit.dx ** 5)) / (
-                                        self.unit.dt ** 2)
+                            Tf = -tm.cross(dist , Ff)
                             self.dem.gf[id].moment_fluid += Tf

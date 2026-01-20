@@ -39,7 +39,7 @@ def setLidDrivenCavity(lattice: PSCLattice3D, uwLU):
             for k in range(lattice.Nz):
                 if k == 0:  # bottom wall
                     lattice.CT[i, j, k] = CellType.VEL_LADD
-                    lattice.vel[i, j, k][0] = -uwLU
+                    lattice.vel[i, j, k][0] = 0
                 if k == lattice.Nz - 1:  # top wall
                     lattice.CT[i, j, k] = CellType.VEL_LADD
                     lattice.vel[i, j, k][0] = uwLU
@@ -53,10 +53,10 @@ def setLidDrivenCavity(lattice: PSCLattice3D, uwLU):
 
 # domain geometry and discretizations
 lx = 0.01  # dimension in x-direction [m]
-ly = 0.004  # dimension in y-direction [m]
-lz = 0.01  # dimension in z-direction [m]
+ly = 0.005  # dimension in y-direction [m]
+lz = 0.005  # dimension in z-direction [m]
 dia = 0.0005
-dx = dia / 8  # lattice spacing [m]
+dx = dia / 12  # lattice spacing [m]
 Nx = int( lx / dx )+ 2  # number of lattice nodes in x-direction
 Ny = int( ly / dx )+ 2  # number of lattice nodes in y-direction
 Nz = int( lz / dx )+ 2  # number of lattice nodes in y-direction
@@ -71,7 +71,7 @@ dens = 2650  # particle density [kg/m3]
 # fluid properties
 rho = 1000 # fluid density [kg/m^3]
 # flow velocity at the entrance and flow regime
-umax = 1
+umax = 0.05
 cp = 5
 # DEM simulation parameters
 particle_init = 'shear_5.p4p'
@@ -79,11 +79,12 @@ particle_init = 'shear_5.p4p'
 
 grav = Vector3(0.0, 0.0 , 0.0 )                          # reduced gravity due to buoyancy [m/s^2]
 
-r = 100
+r = 10
+mu = 1e-3
 nu = 1e-6  # fluid kinematic viscosity [m^2/s]
-Re = rho * (dia/2)**2 * r / nu
+Re = rho * (dia/2)**2 * r / mu
 # LBM relaxation time and time step
-tau = 0.85  # relaxation time
+tau = 0.528  # relaxation time
 omega = 1.0 / tau  # relaxation frequency
 nuLU = (tau - 0.5) / 3.0  # fluid viscosity in lattice units
 dtLBM = (dx ** 2) / (nu / nuLU)  # time step [s]
@@ -91,10 +92,10 @@ dtLBM = (dx ** 2) / (nu / nuLU)  # time step [s]
 
 # iterations
 step = 0  # number of cycles
-total_time = 1
+total_time = 10
 totalSteps = round(total_time / dtLBM)  # total number of time step
-logSteps = round(0.001 / dtLBM)  # print log info every 'logSteps' steps
-subCycles = 10  # number of sub-cycles (no influence if no collision!)
+logSteps = round(0.05 / dtLBM)  # print log info every 'logSteps' steps
+subCycles = 100  # number of sub-cycles (no influence if no collision!)
 dtDEM = dtLBM / subCycles  # DEM time step [s]
 # error tolerance
 err_tol = 1e-9  # the error tolerance
@@ -162,7 +163,7 @@ print(f"Hash table size = {demsolver.bpcd.hash_table.shape[0]}, cell_size = {dem
 # ===========================================#
 # generate the lattice
 lattice = PSCLattice3D(Nx, Ny, Nz, omega, dx, dtLBM, rho ,demsolver)  # basic lattice
-umaxLU = lattice.unit.getLbVel(umax*0.5)  # terminal velocity in lattice units
+umaxLU = lattice.unit.getLbVel(umax)  # terminal velocity in lattice units
 # set boundary conditions
 setLidDrivenCavity(lattice, umaxLU)
 # initialization
@@ -171,10 +172,10 @@ lattice.initialize()
 plane_xy1, plane_xz1, plane_yz1 = lattice.compute_plane_average_stress(axis=2, position=Nz - 2)
 plane_xy2, plane_xz2, plane_yz2 = lattice.compute_plane_average_stress(axis=2, position=1)
 tao_xy = lattice.unit.getPhysSigma(plane_xy1 + plane_xy2)
-nu_new = 0.5 * tao_xy / r
+mu_new = 0.5 * tao_xy / r
 
-print(f"xy平面剪切应力: τ_xy={tao_xy:.6f}")
-print(f"表观粘度： nu1/nu={nu_new / nu:.6f}")
+print(f"xy平面剪切应力: τ_xy={tao_xy}")
+print(f"表观粘度： mu1/mu={mu_new / mu}")
 # save the initial data
 if SAVE_RESULTS:
     results = {'t': 0,
@@ -182,7 +183,7 @@ if SAVE_RESULTS:
                'rhof': lattice.unit.getPhysRho(lattice.rho.to_numpy()),
                'pf': lattice.unit.getPhysSigma((lattice.rho.to_numpy() - 1.0) / 3.0),
                'τ_xy' :tao_xy,
-               'nu1/nu' : nu_new
+               'mu1/nu' : mu_new / mu
 
                }
 
@@ -239,8 +240,8 @@ while  step < totalSteps:
                    'velf': lattice.unit.getPhysVel(lattice.vel.to_numpy()),
                    'rhof': lattice.unit.getPhysRho(lattice.rho.to_numpy()),
                    'pf': lattice.unit.getPhysSigma((lattice.rho.to_numpy() - 1.0) / 3.0),
-                   'τ_xy': tao_xy,
-                   'nu1/nu': nu_new
+                   'τ_xy' :tao_xy,
+                    'mu1/nu' : mu_new / mu
 
                    }
 
@@ -250,10 +251,10 @@ while  step < totalSteps:
         plane_xy1, plane_xz1, plane_yz1 = lattice.compute_plane_average_stress(axis=2, position=Nz - 2)
         plane_xy2, plane_xz2, plane_yz2 = lattice.compute_plane_average_stress(axis=2, position=1)
         tao_xy = lattice.unit.getPhysSigma(plane_xy1 + plane_xy2)
-        nu_new = 0.5 * tao_xy / r
+        mu_new = 0.5 * tao_xy / r
 
-        print(f"xy平面剪切应力: τ_xy={tao_xy:.6f}")
-        print(f"表观粘度： nu1/nu={nu_new / nu:.6f}")
+        print(f"xy平面剪切应力: τ_xy={tao_xy:}")
+        print(f"表观粘度： mu1/mu={mu_new / mu:}")
 
 
         # calculate the error

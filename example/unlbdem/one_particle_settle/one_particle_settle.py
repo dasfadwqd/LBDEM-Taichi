@@ -4,7 +4,6 @@ Reference: https://doi.org/10.1063/1.1512918
 '''
 
 import os
-
 os.system('clear')
 import time
 import pickle
@@ -12,15 +11,17 @@ import numpy as np
 
 # taichi packages (set backend, default precision and device memory)
 import taichi as ti
+import math
 
 ti.init(arch=ti.gpu,
         default_fp=ti.f64,
         default_ip=ti.i32,
+
         debug=False)
 SAVE_RESULTS = True
 
 # source package
-from src.lbdem.psclattice3d import PSCLattice3D
+from src.unlbdem.eqlattice import EqIMBlattice3D
 from src.lbm3d.lbmutils import CellType
 from src.dem3d.demsolver import DEMSolver
 from src.dem3d.demconfig import DEMSolverConfig , DomainBounds, LinearContactConfig ,HertzContactConfig
@@ -31,7 +32,7 @@ Vector3 = ti.types.vector(3, float)
 # ===================================#
 # ----- User-defined Functions -----#
 # ===================================#
-def setContainer(lattice: PSCLattice3D):
+def setContainer(lattice: EqIMBlattice3D):
     for i in range(lattice.Nx):
         for j in range(lattice.Ny):
             for k in range(lattice.Nz):
@@ -43,7 +44,6 @@ def setContainer(lattice: PSCLattice3D):
 # ==================================#
 # ----- Parameter Declaration -----#
 # ==================================#
-
 CASES = {
     'case1': {
         'Re': 31.9,
@@ -75,37 +75,35 @@ lx = 0.1  # dimension in x-direction [m]
 ly = 0.16  # dimension in y-direction [m]
 lz = 0.1  # dimension in z-direction [m]
 dia = 0.015
-dx = dia / 16  # lattice spacing [m]
-Nx = int( lx / dx )+2  # number of lattice nodes in x-direction
-Ny = int( ly / dx )+2  # number of lattice nodes in y-direction
-Nz = int( lz / dx )+2  # number of lattice nodes in y-direction
-x = np.arange(Nx) * dx - 0.5 * dx  # x-coordinates [m]
-y = np.arange(Ny) * dx - 0.5 * dx  # y-coordinates [m]
-z = np.arange(Nz) * dx - 0.5 * dx  # z-coordinates [m]
+dx = 0.025  # lattice spacing [m]
+# Compute grid size to cover [0, L] with margin
+Nx =  int(lx / dx )+2  # number of lattice nodes in x-direction
+Ny =  int(ly / dx )+2  # number of lattice nodes in y-direction
+Nz =  int(lz / dx) +2  # number of lattice nodes in y-direction
 
-
-
-dens = 1120  # particle density [kg/m3]
 
 case_id = 'case1'
 
-# fluid properties
 params = CASES[case_id]
 # fluid properties
 rho = params['rho'] # fluid density [kg/m^3]
 mu = params['mu']  # fluid dynamic viscosity [Pa s]
 nu = mu/rho  # fluid kinematic viscosity [m^2/s]
+
+dens = 1120  # particle density [kg/m3]
+
 # flow velocity at the entrance and flow regime
 Re = params['Re'] # Reynolds number
 umax = params['umax']
 
+
 # DEM simulation parameters
-particle_init = 'single_particle.p4p'
+particle_init = 'one_particle.p4p'
 
 
 grav = Vector3(0.0, -9.81*(dens-rho)/dens , 0.0)                          # reduced gravity due to buoyancy [m/s^2]
 # LBM relaxation time and time step
-tau = 0.60  # relaxation time
+tau = 0.50031  # relaxation time
 omega = 1.0 / tau  # relaxation frequency
 nuLU = (tau - 0.5) / 3.0  # fluid viscosity in lattice units
 dtLBM = (dx ** 2) / (nu / nuLU)  # time step [s]
@@ -113,40 +111,41 @@ dtLBM = (dx ** 2) / (nu / nuLU)  # time step [s]
 
 # iterations
 step = 0  # number of cycles
-total_time = 3.0
+total_time = 5.0
 totalSteps = round(total_time / dtLBM)  # total number of time step
-logSteps = round(0.05 / dtLBM)  # print log info every 'logSteps' steps
-subCycles = 10  # number of sub-cycles (no influence if no collision!)
+logSteps = round(0.1 / dtLBM)  # print log info every 'logSteps' steps
+subCycles = 100  # number of sub-cycles (no influence if no collision!)
 dtDEM = dtLBM / subCycles  # DEM time step [s]
 
 # data saving
 if SAVE_RESULTS:
-    outDir = '../single_particle_settle/Re{}_fully/'.format(Re)
+    outDir = '../one_particle_settle/Re{}_un/'.format(Re)
     os.makedirs(outDir + 'results', exist_ok=True)
 
 # =======================================#
 # ----- Initialize DEM Simulation ----- #
 # =======================================#
 # instantiate DEM simulation
-xmin=np.min(x) + 0.5 * dx,
-xmax=np.max(x) - 0.5 * dx,
-ymin=np.min(y) + 0.5 * dx,
-ymax=np.max(y) - 0.5 * dx,
-zmin=np.min(z) + 0.5 * dx,
-zmax=np.max(z) - 0.5 * dx,
-domain = DomainBounds(xmin=np.min(x) + 0.5 * dx,
-        xmax=np.max(x) - 0.5 * dx,
-        ymin=np.min(y) + 0.5 * dx,
-        ymax=np.max(y) - 0.5 * dx,
-        zmin=np.min(z) + 0.5 * dx,
-        zmax=np.max(z) - 0.5 * dx,
+xmin=0.0,
+xmax=0.1,
+ymin=0.0,
+ymax=0.16,
+zmin=0.0,
+zmax=0.1,
+domain = DomainBounds(xmin=0.0,
+        xmax=0.1,
+        ymin=0.0,
+        ymax=0.16,
+        zmin=0.0,
+        zmax=0.1,
                       )
 
+# Set up particle properties
 contact_model = LinearContactConfig(
     stiffness_normal=1e5,
     stiffness_tangential=1e5,
-    damping_normal=0.2,
-    damping_tangential=0.2,
+    damping_normal=0.1,
+    damping_tangential=0.1,
     pp_friction=0.2,
     pw_friction=0.2
  )
@@ -183,12 +182,13 @@ print(f"Hash table size = {demsolver.bpcd.hash_table.shape[0]}, cell_size = {dem
 # ----- Initialization LBM Simulation ----- #
 # ===========================================#
 # generate the lattice
-lattice = PSCLattice3D(Nx, Ny, Nz, omega, dx, dtLBM, rho ,demsolver)  # basic lattice
+lattice = EqIMBlattice3D(Nx, Ny, Nz, omega, dx, dtLBM, rho ,demsolver)  # basic lattice
 umaxLU = lattice.unit.getLbVel(umax)  # terminal velocity in lattice units
 # set boundary conditions
 setContainer(lattice)
 # initialization
-lattice.initialize()
+lattice.initialize_complete()
+
 
 # save the initial data
 if SAVE_RESULTS:
@@ -216,6 +216,10 @@ print('Relaxation time: {:.3f}'.format(tau))
 print('Reynolds number: {:.3f}'.format(Re))
 print('Mach number: {}'.format(umaxLU * np.sqrt(3)))
 print('-----------------------')
+print('-----------------------')
+print('Simulation info')
+print('Total steps: {}'.format(totalSteps))
+print('Save data every {} steps'.format(logSteps))
 print('*****************************************')
 
 # ==============================#
@@ -232,12 +236,14 @@ while  step < totalSteps:
     for _ in range(logSteps):
         # LBM calculations
         step += 1  # step counter
-        lattice.collide()  # collision step
-        lattice.stream()  # streaming step
-
         # DEM calculations
         for _ in range(subCycles):
             demsolver.run_simulation()  # inter-particle interactions
+
+        lattice.collide()  # collision step
+        lattice.stream()  # streaming step
+        lattice.update_coupling()
+
 
 
     # store flow properties at t
@@ -258,9 +264,12 @@ while  step < totalSteps:
     dtLoop = tEnd - tLoop  # time difference between two logs
     dtTotal = tEnd - tStart  # time spent since the start
     mlups = Nx * Ny *  Nz * logSteps / dtLoop / 1e6  # million lattice updates per second
-    print("Step: {}/{} | Velocity ratio: {:.4f} | Speed: {:.0f} MLU/s | Total time: {:.0f} seconds".format(step,
+    print("Step: {}/{} | Velocity ratio: {:.4f} | {}Speed: {:.0f} MLU/s | Total time: {:.0f} seconds".format(step,
                                                                                                            totalSteps,
                                                                                                            -demsolver.gf[0].velocity[1] / umax,
+                                                                                                             demsolver.gf[
+                                                                                                                 0].force_fluid[
+                                                                                                                 1],
                                                                                                            mlups,
                                                                                                            dtTotal))
 
