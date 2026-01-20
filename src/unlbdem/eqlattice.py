@@ -57,6 +57,8 @@ class EqIMBlattice3D(BasicLattice3D):
            rho (float): Fluid density [kg/m³]
            demslover (DEMSolver): DEM solver instance for particle dynamics
        """
+    # 编译时常量版本（新增）
+    QINV_STATIC = (0, 2, 1, 4, 3, 6, 5, 8, 7, 10, 9, 12, 11, 14, 13, 16, 15, 18, 17)
 
     def __init__(self, Nx: int, Ny: int, Nz: int, omega: float,
                  dx: float, dt: float, rho: float, demslover: DEMSolver):
@@ -66,6 +68,7 @@ class EqIMBlattice3D(BasicLattice3D):
         This constructor sets up the lattice structure and initializes fields
         required for fluid-particle coupling.
         """
+
         # Initialize parent class (BasicLattice3D)
         super().__init__(Nx, Ny, Nz, omega, dx, dt, rho)
 
@@ -94,6 +97,7 @@ class EqIMBlattice3D(BasicLattice3D):
 
         # Store reference to DEM solver for data exchange
         self.dem = demslover
+
 
     # =====================================
     # Initialization Method
@@ -128,59 +132,106 @@ class EqIMBlattice3D(BasicLattice3D):
     @ti.kernel
     def grains2lattice(self):
         """
-        Map DEM grain data to Eulerian lattice using Kernel function weight interpolation.
+        Optimized version with boundary-aware weight redistribution.
 
-        Version features:
-          1. Grain-first traversal: iterate grains, then affected lattice nodes.
-          2. Boundary-aware normalization: weights from excluded boundary nodes
-             (e.g., obstacles, velocity inlets) are redistributed to valid nodes.
+        When a grain is near boundary nodes, weights from excluded boundaries
+        are redistributed to valid nodes, ensuring mass/momentum conservation.
         """
-        # =====================================
-        # Reset Accumulation Fields
-        # =====================================
-        self.volfrac.fill(0.0)  # Volume fraction field
-        self.velsolid.fill(0.0)  # Final solid velocity field
-        self.velsum.fill(0.0)  # Weighted velocity accumulator
-        self.weight_sum.fill(0.0)  # Total interpolation weight per node
+        # Reset fields
+        self.volfrac.fill(0.0)
+        self.velsolid.fill(0.0)
+        self.velsum.fill(0.0)
+        self.weight_sum.fill(0.0)
 
-
-        V_lattice = self.unit.dx ** 3  # Volume of a single lattice cell
+        V_lattice = self.unit.dx ** 3
 
         # =====================================
-        # Traverse All Lattice
+        # Grain-First Traversal
+        # =====================================
+        for id in range(self.dem.gf.shape[0]):
+            # Pre-compute grain properties
+            xc = (self.dem.gf[id].position[0] - self.dem.config.domain.xmin + 0.5 * self.unit.dx) / self.unit.dx
+            yc = (self.dem.gf[id].position[1] - self.dem.config.domain.ymin + 0.5 * self.unit.dx) / self.unit.dx
+            zc = (self.dem.gf[id].position[2] - self.dem.config.domain.zmin + 0.5 * self.unit.dx) / self.unit.dx
+            r = self.dem.gf[id].radius / self.unit.dx
+
+            V_grain = 4.0 / 3.0 * tm.pi * self.dem.gf[id].radius ** 3
+            vel_lattice = self.dem.gf[id].velocity * self.unit.dt / self.unit.dx
+
+            # Compute bounding box
+            support_radius = 1.5  # Adjust based on your kernel function
+
+            i_min = ti.max(0, ti.cast(xc - support_radius, ti.i32))
+            i_max = ti.min(self.Nx, ti.cast(xc + support_radius + 1, ti.i32))
+            j_min = ti.max(0, ti.cast(yc - support_radius, ti.i32))
+            j_max = ti.min(self.Ny, ti.cast(yc + support_radius + 1, ti.i32))
+            k_min = ti.max(0, ti.cast(zc - support_radius, ti.i32))
+            k_max = ti.min(self.Nz, ti.cast(zc + support_radius + 1, ti.i32))
+
+            # =====================================
+            # First Pass: Calculate total weights (including boundaries)
+            # =====================================
+            total_weight = 0.0  # Total weight including boundary nodes
+            valid_weight = 0.0  # Weight only from valid nodes
+
+            for i in range(i_min, i_max):
+                for j in range(j_min, j_max):
+                    for k in range(k_min, k_max):
+                        dist = ti.sqrt((xc - i)**2 + (yc - j)**2 + (zc - k)**2)
+                        weight = self.threedelta(dist)
+
+                        if weight < 0:
+                            continue
+
+                        total_weight += weight
+
+                        # Check if this is a valid (non-boundary) node
+                        is_boundary = self.CT[i, j, k] & (CellType.OBSTACLE | CellType.VEL_LADD | CellType.FREE_SLIP)
+                        if not is_boundary:
+                            valid_weight += weight
+
+            # =====================================
+            # Second Pass: Redistribute weights to valid nodes
+            # =====================================
+            if valid_weight > 0:  # Only proceed if there are valid nodes
+                # Correction factor to redistribute boundary weights
+                correction_factor = total_weight / valid_weight
+
+                for i in range(i_min, i_max):
+                    for j in range(j_min, j_max):
+                        for k in range(k_min, k_max):
+                            # Skip boundary nodes
+                            if self.CT[i, j, k] & (CellType.OBSTACLE | CellType.VEL_LADD | CellType.FREE_SLIP):
+                                continue
+
+                            dist = ti.sqrt((xc - i)**2 + (yc - j)**2 + (zc - k)**2)
+                            weight_raw = self.threedelta(dist)
+
+                            if weight_raw < 0:
+                                continue
+
+                            # Apply correction factor to redistribute boundary weights
+                            weight_corrected = weight_raw * correction_factor
+
+                            volume_contribution = weight_corrected * V_grain / V_lattice
+
+                            # Atomic operations for thread safety
+                            ti.atomic_add(self.volfrac[i, j, k], volume_contribution)
+                            ti.atomic_add(self.velsum[i, j, k], weight_corrected * vel_lattice)
+                            ti.atomic_add(self.weight_sum[i, j, k], weight_corrected)
+
+        # =====================================
+        # Normalize velocity field
         # =====================================
         for i, j, k in ti.ndrange(self.Nx, self.Ny, self.Nz):
-            # skip the boundary nodes
-            if self.CT[i, j, k] & (CellType.OBSTACLE | CellType.VEL_LADD | CellType.FREE_SLIP):
-                continue
-            for id in range(self.dem.gf.shape[0]):
-                # Convert grain position and radius to lattice units
-                xc = (self.dem.gf[id].position[0] - self.dem.config.domain.xmin + 0.5 * self.unit.dx) / self.unit.dx
-                yc = (self.dem.gf[id].position[1] - self.dem.config.domain.ymin + 0.5 * self.unit.dx) / self.unit.dx
-                zc = (self.dem.gf[id].position[2] - self.dem.config.domain.zmin + 0.5 * self.unit.dx) / self.unit.dx
-                r = self.dem.gf[id].radius / self.unit.dx
+            # Clamp volume fraction
+            if self.volfrac[i, j, k] > 1.0:
+                self.volfrac[i, j, k] = 1.0
+                print("self.volfrac[{}, {}, {}] > 1.0".format(i,j,k))
 
-                V_grain = 4.0 / 3.0 * tm.pi * self.dem.gf[id].radius ** 3
-                vel_lattice = self.dem.gf[id].velocity * self.unit.dt / self.unit.dx
-
-                dist = ti.sqrt((xc - i) ** 2 + (yc - j) ** 2 + (zc - k) ** 2)
-                weight = self.threedelta(dist)
-                volume_contribution = weight * V_grain / V_lattice
-
-                self.volfrac[i, j, k] += volume_contribution
-
-                if self.volfrac[i, j, k] > 1.0:
-                    print(f"WARNING at ({i},{j},{k}): Volume fraction = {self.volfrac[i, j, k]}")
-                    self.volfrac[i, j, k] = 1.0  # Clamp to maximum physical value
-                self.velsum[i, j, k] += weight * vel_lattice
-                self.weight_sum[i, j, k] += weight
-
-
-            if self.weight_sum[i, j, k] > 0:
+            # Compute normalized velocity
+            if self.weight_sum[i, j, k] > 1e-10:
                 self.velsolid[i, j, k] = self.velsum[i, j, k] / self.weight_sum[i, j, k]
-
-
-
 
     # ==========================================#
     # ----- Calculate Weight Coefficient ----- #
@@ -217,8 +268,9 @@ class EqIMBlattice3D(BasicLattice3D):
                         self.unit.dt ** 2)
                 F_lattice_mag = F_d_mag / F_lattice
 
-                if v_slip_mag > 0:
-                    self.weight[i ,j ,k ] = w_d
+                self.weight[i ,j ,k ] = w_d
+                if self.weight[i ,j ,k ] > 1.0:
+                    print("Waning! weight[{} ,{} ,{} ] > 1".format(i , j , k))
 
     @ti.func
     def weight_coefficient(self, dp: float, u_slip: Vector3, svf: float) -> float:
@@ -334,9 +386,11 @@ class EqIMBlattice3D(BasicLattice3D):
 
             # Apply collision based on local solid fraction
             if self.volfrac[i, j, k] > 0.:
+
                 self.collide_solid(i, j, k)  # solid-influenced collision
             else:
                 self.collide_fluid(i, j, k)  # pure fluid BGK
+
 
 
 
@@ -375,13 +429,12 @@ class EqIMBlattice3D(BasicLattice3D):
         # Update equilibrium using solid velocity
         self.compute_feq_solid(i, j, k)
 
-        # Apply weighted collision
         for q in ti.static(range(EqIMBlattice3D.Q)):
-            # Solid momentum exchange term
+            q_inv = ti.static(EqIMBlattice3D.QINV_STATIC[q])  # ← 使用编译时常量
 
             Omega_s = (
-                    self.f[i, j, k][EqIMBlattice3D.qinv[q]]
-                    - self.feq[i, j, k][EqIMBlattice3D.qinv[q]]
+                    self.f[i, j, k][q_inv]
+                    - self.feq[i, j, k][q_inv]
                     + self.feqsolid[i, j, k][q]
                     - self.f[i, j, k][q]
             )

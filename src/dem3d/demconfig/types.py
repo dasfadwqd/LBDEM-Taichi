@@ -35,16 +35,16 @@ class DomainBounds:
 @dataclass
 class ParticleProperties:
     """Material properties of particles."""
-    elastic_modulus: float = 2.7e8  # Pa
-    poisson_ratio: float = 0.25
-    density: float = 2500           # kg/m³
+    elastic_modulus: float = 0  # Pa
+    poisson_ratio: float = 0
+    density: float = 0           # kg/m³
 
-    max_coordinate_number: int = 40
+    max_coordinate_number: int = 0
 
 
 @dataclass
 class WallProperties:
     """Material properties of walls."""
-    density: float = 2500           # kg/m³
-    elastic_modulus: float = 1e9    # Pa
-    poisson_ratio: float = 0.25
+    density: float = 0           # kg/m³
+    elastic_modulus: float = 0    # Pa
+    poisson_ratio: float = 0.0
