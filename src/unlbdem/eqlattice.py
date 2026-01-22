@@ -1,8 +1,10 @@
-'''
-This program adopts the particle equivalent method proposed in the research paper by
-Professor Limin Wang, implementing the un-resolved LBM-DEM coupling simulation.
-Reference: DOI: https://doi.org/10.1016/j.cej.2023.142898
-'''
+"""
+Unresolved LBM-DEM coupling simulation based on the particle equivalence method
+proposed by Prof. Limin Wang (DOI: https://doi.org/10.1016/j.cej.2023.142898).
+This implementation combines Lattice Boltzmann Method (LBM) for fluid dynamics
+and Discrete Element Method (DEM) for particle motion, using a modified
+Immersed Boundary Method (IBM) with unresolved grid resolution (dx > particle size).
+"""
 
 import taichi as ti
 import taichi.math as tm
@@ -11,11 +13,12 @@ import taichi.math as tm
 # =====================================
 # Module Imports
 # =====================================
-# LBM module - Lattice Boltzmann Method components
+
+# LBM components
 from src.lbm3d.lbm_solver3d import BasicLattice3D
 from src.lbm3d.lbmutils import CellType
 
-# DEM module - Discrete Element Method components
+# DEM components
 from src.dem3d.demsolver import DEMSolver
 
 from src.unlbdem.utils import Interpolation
