@@ -8,6 +8,10 @@ from .contact_model import ContactModelConfig, LinearContactConfig, HertzContact
 class DEMSolverConfig:
     """Configuration for the DEM solver."""
 
+    # ✅ 方案一：在类定义开头定义边界类型常量（类变量）
+    BOUNDARY_TYPE_WALL = 0  # Wall boundary
+    BOUNDARY_TYPE_PERIODIC = 1  # Periodic boundary
+
     def __init__(self,
                  domain: DomainBounds,
                  dt: float,
@@ -43,6 +47,16 @@ class DEMSolverConfig:
             self.domain.zmax, -self.domain.zmin,
         ]
 
+
+        self.boundaryType = [
+            self.BOUNDARY_TYPE_WALL,  # right wall
+            self.BOUNDARY_TYPE_WALL,  # left wall
+            self.BOUNDARY_TYPE_WALL,  # top wall
+            self.BOUNDARY_TYPE_WALL,  # bottom wall
+            self.BOUNDARY_TYPE_WALL,  # front wall
+            self.BOUNDARY_TYPE_WALL,  # back wall
+        ]
+
     def set_particle_properties(self, **kwargs) -> 'DEMSolverConfig':
         for key, value in kwargs.items():
             if hasattr(self.particle_props, key):
@@ -57,6 +71,29 @@ class DEMSolverConfig:
                 setattr(self.wall_props, key, value)
             else:
                 raise ValueError(f"Unknown wall property: {key}")
+        return self
+
+    def set_periodic_boundaries(self, x_periodic=False, y_periodic=False, z_periodic=False):
+        """
+        Set periodic boundaries in batch
+
+        Parameters:
+        x_periodic: Whether the boundary in the X direction is periodic
+        y_periodic: Whether the boundary in the Y direction is periodic
+        z_periodic: Whether the boundary in the Z direction is periodic
+        """
+        if x_periodic:
+            self.boundaryType[0] = self.BOUNDARY_TYPE_PERIODIC  # right
+            self.boundaryType[1] = self.BOUNDARY_TYPE_PERIODIC  # left
+
+        if y_periodic:
+            self.boundaryType[2] = self.BOUNDARY_TYPE_PERIODIC  # top
+            self.boundaryType[3] = self.BOUNDARY_TYPE_PERIODIC  # bottom
+
+        if z_periodic:
+            self.boundaryType[4] = self.BOUNDARY_TYPE_PERIODIC  # front
+            self.boundaryType[5] = self.BOUNDARY_TYPE_PERIODIC  # back
+
         return self
 
     def update_contact_model(self, **kwargs) -> 'DEMSolverConfig':

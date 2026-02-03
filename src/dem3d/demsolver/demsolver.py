@@ -217,6 +217,7 @@ class DEMSolver:
             self.wf[j].distance = self.config.wall_distances[j] # Distance between origin and the wall, D
             # Material property
             self.wf[j].materialType = 1;  # Hard coding
+            self.wf[j].boundaryType = self.config.boundaryType[j]
 
         contact_model = self.config.contact_model
         # ========================================
@@ -236,9 +237,6 @@ class DEMSolver:
         # ========================================
         # Contact Model Specific Parameters
         # ========================================
-
-
-
         if isinstance(contact_model, LinearContactConfig):
             # ===== Linear Contact Model =====
             print("Setting up Linear contact model parameters...")
@@ -449,7 +447,69 @@ class DEMSolver:
             gf[i].force += gf[i].force_fluid
             gf[i].moment += gf[i].moment_fluid
 
+    # NEW: Apply periodic boundary conditions
+    @ti.func
+    def apply_periodic_boundary(self, position: Vector3) -> Vector3:
+        """
+        Apply periodic boundary conditions to the particle positions.
+        If a particle crosses the periodic boundary, move it to the opposite side.
+        """
+        new_pos = position
 
+        # X direction
+        if self.config.boundaryType[0] == self.config.BOUNDARY_TYPE_PERIODIC:  # X+ boundary
+            if position[0] > self.config.domain.xmax:
+                new_pos[0] = position[0] - ( self.config.domain.xmax - self.config.domain.xmin )
+            elif position[0] < self.config.domain.xmin:
+                new_pos[0] = position[0] + ( self.config.domain.xmax - self.config.domain.xmin )
+
+        # Y direction
+        if self.config.boundaryType[2] == self.config.BOUNDARY_TYPE_PERIODIC:  # Y+ boundary
+            if position[1] > self.config.domain.ymax:
+                new_pos[1] = position[1] - ( self.config.domain.ymax - self.config.domain.ymin )
+            elif position[1] < self.config.domain.ymin:
+                new_pos[1] = position[1] + ( self.config.domain.ymax - self.config.domain.ymin )
+
+        # Z direction
+        if self.config.boundaryType[4] == self.config.BOUNDARY_TYPE_PERIODIC:  # Z+ boundary
+            if position[2] > self.config.domain.zmax:
+                new_pos[2] = position[2] - ( self.config.domain.zmax - self.config.domain.zmin )
+            elif position[2] < self.config.domain.zmin:
+                new_pos[2] = position[2] + ( self.config.domain.zmax - self.config.domain.zmin )
+
+        return new_pos
+
+    # NEW: Calculate minimum distance considering periodic boundaries
+    @ti.func
+    def get_periodic_distance_vector(self, pos_i: Vector3, pos_j: Vector3) -> Vector3:
+        """
+        Calculate the shortest distance vector considering
+        periodic boundaries Return the vector from i to j
+        """
+        delta = pos_j - pos_i
+
+        # X direction
+        if self.config.boundaryType[0] == self.config.BOUNDARY_TYPE_PERIODIC:
+            if delta[0] > 0.5 * ( self.config.domain.xmax - self.config.domain.xmin ):
+                delta[0] -= ( self.config.domain.xmax - self.config.domain.xmin )
+            elif delta[0] < -0.5 * ( self.config.domain.xmax - self.config.domain.xmin ):
+                delta[0] += ( self.config.domain.xmax - self.config.domain.xmin )
+
+        # Y direction
+        if self.config.boundaryType[2] == self.config.BOUNDARY_TYPE_PERIODIC:
+            if delta[1] > 0.5 * ( self.config.domain.ymax - self.config.domain.ymin ):
+                delta[1] -= ( self.config.domain.ymax - self.config.domain.ymin )
+            elif delta[1] < -0.5 * ( self.config.domain.ymax - self.config.domain.ymin ):
+                delta[1] += ( self.config.domain.ymax - self.config.domain.ymin )
+
+        # Z direction
+        if self.config.boundaryType[4] == self.config.BOUNDARY_TYPE_PERIODIC:
+            if delta[2] > 0.5 * ( self.config.domain.zmax - self.config.domain.zmin ):
+                delta[2] -= ( self.config.domain.zmax - self.config.domain.zmin )
+            elif delta[2] < -0.5 * ( self.config.domain.zmax - self.config.domain.zmin ):
+                delta[2] += ( self.config.domain.zmax - self.config.domain.zmin )
+
+        return delta
     # NVE integrator with particle state control and improved Velocity Verlet
     @ti.kernel
     def update(self):
@@ -468,6 +528,7 @@ class DEMSolver:
             elif gf[i].fixvel:
                 # Fixed velocity particle: update position with constant velocity
                 gf[i].position += gf[i].velocity * dt
+                gf[i].position = self.apply_periodic_boundary(gf[i].position)
                 # Update orientation with constant angular velocity
                 # Use quaternion differential equation with fixed angular velocity
                 # Eqs. (5)-(16)
@@ -522,6 +583,7 @@ class DEMSolver:
 
                 # Update position using current velocity and acceleration
                 gf[i].position += gf[i].velocity * dt + 0.5 * a * dt ** 2
+                gf[i].position = self.apply_periodic_boundary(gf[i].position)
 
                 # Store current acceleration for next time step
                 gf[i].acceleration = a
@@ -588,6 +650,10 @@ class DEMSolver:
         # Particle-particle contacts
         offset = self.search_active_contact_offset(i, j)
 
+        # NEW: Use periodic distance calculation
+        distance_vec = self.get_periodic_distance_vector(gf[i].position, gf[j].position)
+        distance = tm.length(distance_vec)
+
         if offset >= 0:  # Existing contact
             # Check if particles are still in contact
             gap = tm.length(gf[j].position - gf[i].position) - gf[i].radius - gf[j].radius
@@ -621,7 +687,7 @@ class DEMSolver:
             # Contact resolution
             # Find out rotation matrix
             # https://math.stackexchange.com/questions/180418/calculate-rotation-matrix-to-align-vector-a-to-vector-b-in-3d
-            a = tm.normalize(gf[j].position - gf[i].position)
+            a = tm.normalize(distance_vec)  # MODIFIED: Use periodic distance vector
             b = Vector3(1.0, 0.0, 0.0)  # Local x coordinate
             v = tm.cross(a, b)
             s = tm.length(v)
@@ -757,6 +823,9 @@ class DEMSolver:
         wcf = ti.static(self.wcf)
         # All particles will be contact detection with the wall
         for i, j in ti.ndrange(gf.shape[0], wf.shape[0]):
+        # NEW: Skip if this is a periodic boundary
+            if wf[j].boundaryType == self.config.BOUNDARY_TYPE_PERIODIC:
+                continue
             # Particle-wall contacts
             if wcf[i, j].isActive:  # Existing contact
                 if -(tm.dot(gf[i].position, wf[j].normal) - wf[j].distance) > gf[i].radius:  # Non-contact
