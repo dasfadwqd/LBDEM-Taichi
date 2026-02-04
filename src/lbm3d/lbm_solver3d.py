@@ -94,6 +94,8 @@ class BasicLattice3D:
     velmax = (2. / 3.) ** 0.5  # maximum velocity -> feq[0] > 0
     cssq = 1.0 / 3.0  # speed of sound squared
 
+    SmagorinskyConstant = 0.1 # Smagorinsky constant (typically 0.1-0.2)
+
     # =========================#
     # ----- Constructor ----- #
     # =========================#
@@ -115,6 +117,7 @@ class BasicLattice3D:
         self.Nz = Nz
         self.omega = ti.field(float, shape=(Nx, Ny, Nz))
         self.omega.fill(omega)
+        self.omega0 = omega
 
         # density distribution functions
         self.f = ti.Vector.field(BasicLattice3D.Q, float, shape=(Nx, Ny, Nz))  # density distribution functions
@@ -142,6 +145,7 @@ class BasicLattice3D:
         self.stress_xy = ti.field(float, shape=(Nx, Ny, Nz))  # shear stress in xy
         self.stress_xz = ti.field(float, shape=(Nx, Ny, Nz))  # shear stress in xz
         self.stress_yz = ti.field(float, shape=(Nx, Ny, Nz))  # shear stress in yz
+
 
         # derived stress quantities (NEW)
         self.shear_stress_mag = ti.field(float, shape=(Nx, Ny, Nz))  # magnitude of shear stress
@@ -179,6 +183,7 @@ class BasicLattice3D:
             if self.CT[i, j, k] & (CellType.OBSTACLE | CellType.VEL_LADD | CellType.FREE_SLIP):
                 continue
 
+            self.computeOmega(i, j, k)
             # update the equilibrium state
             self.compute_feq(i, j, k)
 
@@ -485,6 +490,23 @@ class BasicLattice3D:
 
         # assign the local strain-rate
         self.rate[i, j, k] = self.omega[i, j, k] / (2.0 * BasicLattice3D.cssq * self.rho[i, j, k]) * Pi
+
+    @ti.func
+    def computeOmega(self, i: int, j: int, k: int):
+        """Compute local relaxation frequency based on effective viscosity
+        """
+
+        # Compute strain rate magnitude using lattice-specific method
+        self.compute_strain_rate(i ,j ,k)
+        # Compute turbulent viscosity: nu_t = (Cs * Delta)^2 * |S|
+        nuTurb = (BasicLattice3D.SmagorinskyConstant * 1.0 ) ** 2 * self.rate[i, j, k]
+
+        # Effective relaxation time: tau_eff = tau0 + nu_turb / cs^2
+        tauEff = 1.0 /self.omega0 + nuTurb / BasicLattice3D.cssq
+
+        self.omega[i ,j ,k] = 1 / tauEff
+
+
 
     # ==================================#
     # ----- Zou & He Velocity BC ----- #

@@ -4,8 +4,8 @@ A module that contains the collision operator with the body force.
 '''
 
 import taichi as ti
-from lbm_solver3d import BasicLattice3D
-from lbmutils import CellType
+from .lbm_solver3d import BasicLattice3D
+from .lbmutils import CellType
 
 # =====================================
 # Type Definitions
