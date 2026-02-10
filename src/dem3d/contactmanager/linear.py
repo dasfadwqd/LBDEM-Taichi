@@ -138,7 +138,7 @@ class LinearContactModel(ContactModel):
         # Shear direction - LOCAL - the force towards the wall
 
         try_shear_force  = - ks_star * wcf[i, j].shear_displacement
-        if tm.length(try_shear_force) >= mu * F[0]:  # Sliding
+        if tm.length(try_shear_force) >= mu * F[0] > 0.0:  # Sliding
             ratio = mu * F[0] / tm.length(try_shear_force)
             F[1] = try_shear_force[1] * ratio
             F[2] = try_shear_force[2] * ratio
