@@ -21,3 +21,4 @@ class Wall:
     normal: Vector3      # Unit normal vector pointing *into* the valid simulation domain
     distance: float      # Signed distance from the origin to the wall (i.e., d in n·x = d)
     materialType: int    # Material identifier for contact response (e.g., friction, stiffness)
+    boundaryType: int    # Boundary type ( Wall boundary = 0, Periodic boundary = 1 )
