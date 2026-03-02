@@ -173,9 +173,9 @@ class EqIMBlattice3D(BasicLattice3D):
         # Normalize velocity field
         # =====================================
         for i, j, k in ti.ndrange(self.Nx, self.Ny, self.Nz):
-            if self.volfrac[i, j, k] > 1.0:
-                self.volfrac[i, j, k] = 1.0
-                print("Warning: volfrac[{}, {}, {}] > 1.0".format(i, j, k))
+            if self.volfrac[i, j, k] >= 1.0:
+                self.volfrac[i, j, k] = 0.9999
+                print("Warning: volfrac[{}, {}, {}] >= 1.0".format(i, j, k))
             if self.weight_sum[i, j, k] > 1e-10:
                 self.velsolid[i, j, k] = self.velsum[i, j, k] / self.weight_sum[i, j, k]
 
