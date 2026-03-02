@@ -83,7 +83,7 @@ class HertzMindlinContactModel(ContactModel):
         # Shear direction - LOCAL - the force towards particle j
 
         try_shear_force = - k_t * cf[offset].shear_displacement
-        if tm.length(try_shear_force) >= mu * F[0]:  # Sliding
+        if tm.length(try_shear_force) >= mu * F[0] and tm.length(try_shear_force) > 0.0:  # Sliding
             ratio: ti.f64 = mu * F[0] / tm.length(try_shear_force)
             F[1] = try_shear_force[1] * ratio
             F[2] = try_shear_force[2] * ratio
@@ -138,7 +138,7 @@ class HertzMindlinContactModel(ContactModel):
         F[0] = - k_n * gap - gamma_n * v_c[0]
         # Shear direction - LOCAL - the force towards the wall
         try_shear_force  = - k_t * wcf[i, j].shear_displacement
-        if tm.length(try_shear_force) >= mu * F[0]:  # Sliding
+        if tm.length(try_shear_force) >= mu * F[0] and tm.length(try_shear_force) > 0.0:  # Sliding
             ratio = mu * F[0] / tm.length(try_shear_force)
             F[1] = try_shear_force[1] * ratio
             F[2] = try_shear_force[2] * ratio
