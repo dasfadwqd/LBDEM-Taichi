@@ -140,8 +140,13 @@ class EqIMBlattice3D(BasicLattice3D):
             for i in range(i_min, i_max):
                 for j in range(j_min, j_max):
                     for k in range(k_min, k_max):
-                        dist = ti.sqrt((xc - i)**2 + (yc - j)**2 + (zc - k)**2)
-                        weight = self.threedelta(dist)
+                        dist_x = ti.abs(xc - i)
+                        dist_y = ti.abs(yc - j)
+                        dist_z = ti.abs(zc - k)
+                        weight_x = self.threedelta(dist_x)
+                        weight_y = self.threedelta(dist_y)
+                        weight_z = self.threedelta(dist_z)
+                        weight  = weight_x * weight_y * weight_z
                         if weight < 0:
                             continue
                         total_weight += weight
@@ -160,7 +165,13 @@ class EqIMBlattice3D(BasicLattice3D):
                             if self.CT[i, j, k] & (CellType.OBSTACLE | CellType.VEL_LADD | CellType.FREE_SLIP):
                                 continue
                             dist = ti.sqrt((xc - i)**2 + (yc - j)**2 + (zc - k)**2)
-                            weight_raw = self.threedelta(dist)
+                            dist_x = ti.abs(xc - i)
+                            dist_y = ti.abs(yc - j)
+                            dist_z = ti.abs(zc - k)
+                            weight_x = self.threedelta(dist_x)
+                            weight_y = self.threedelta(dist_y)
+                            weight_z = self.threedelta(dist_z)
+                            weight_raw = weight_x * weight_y * weight_z
                             if weight_raw < 0:
                                 continue
                             weight_corrected = weight_raw * correction_factor
@@ -173,8 +184,8 @@ class EqIMBlattice3D(BasicLattice3D):
         # Normalize velocity field
         # =====================================
         for i, j, k in ti.ndrange(self.Nx, self.Ny, self.Nz):
-            if self.volfrac[i, j, k] >= 1.0:
-                self.volfrac[i, j, k] = 0.9999
+            if self.volfrac[i, j, k] >= 1:
+                self.volfrac[i, j, k] = 0.99
                 print("Warning: volfrac[{}, {}, {}] >= 1.0".format(i, j, k))
             if self.weight_sum[i, j, k] > 1e-10:
                 self.velsolid[i, j, k] = self.velsum[i, j, k] / self.weight_sum[i, j, k]
@@ -323,12 +334,18 @@ class EqIMBlattice3D(BasicLattice3D):
                         if self.CT[i, j, k] & (CellType.OBSTACLE | CellType.VEL_LADD | CellType.FREE_SLIP):
                             continue
                         dist = ti.sqrt((xc - i) ** 2 + (yc - j) ** 2 + (zc - k) ** 2)
-                        weight = self.threedelta(dist)
+                        dist_x = ti.abs(xc - i)
+                        dist_y = ti.abs(yc - j)
+                        dist_z = ti.abs(zc - k)
+                        weight_x = self.threedelta(dist_x)
+                        weight_y = self.threedelta(dist_y)
+                        weight_z = self.threedelta(dist_z)
+                        weight = weight_x * weight_y * weight_z
                         fluid_vel_particle += self.vel[i, j, k] * weight
                         volfrac_particle += self.volfrac[i, j, k] * weight
 
-            if volfrac_particle > 1e-10:
-                eps_p = volfrac_particle
+            if volfrac_particle > 0:
+                eps_p = ti.min(ti.max(volfrac_particle, 0.0), 0.99)  # clamp
                 d_p = 2.0 * self.dem.gf[id].radius
                 fluid_vel = fluid_vel_particle * self.unit.dx / self.unit.dt
                 u_slip = self.dem.gf[id].velocity - fluid_vel
