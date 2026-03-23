@@ -256,7 +256,7 @@ class HybridLattice3D(BasicLattice3D):
             # Grain center in lattice coordinates
             xc = (self.dem.gf[gid].position[0] - self.dem.config.domain.xmin + 0.5 * self.unit.dx) / self.unit.dx
             yc = (self.dem.gf[gid].position[1] - self.dem.config.domain.ymin + 0.5 * self.unit.dx) / self.unit.dx
-            zc = (self.dem.gf[gid].position[2] - self.dem.config.domain.zmin + 0.5 * self.unit.dx)
+            zc = (self.dem.gf[gid].position[2] - self.dem.config.domain.zmin + 0.5 * self.unit.dx) / self.unit.dx
 
             V_grain = 4.0 / 3.0 * tm.pi * self.dem.gf[gid].radius ** 3
             vel_lattice = self.dem.gf[gid].velocity * self.unit.dt / self.unit.dx
@@ -382,24 +382,12 @@ class HybridLattice3D(BasicLattice3D):
 
     @ti.func
     def collide_coarse(self, i: int, j: int, k: int):
-        """
-        PSC collision for resolved (coarse) particles.
-        Formula: f_post = f + B·Ω_s + (1-B)·Ω_f
-        Accumulates hydrodynamic force via momentum exchange.
-        """
         self.compute_feq_solid_coarse(i, j, k)
         B = self.coarse_weight[i, j, k]
 
         for q in range(HybridLattice3D.Q):
-            q_inv = HybridLattice3D.QINV_STATIC[q]
-
-            # Solid collision operator (Bounce-back with solid feq)
-            Omega_s = (
-                self.f[i, j, k][q_inv]
-                - self.feq[i, j, k][q_inv]
-                + self.coarse_feqsolid[i, j, k][q]
-                - self.f[i, j, k][q]
-            )
+            Omega_s = (self.f[i, j, k][HybridLattice3D.qinv[q]] - self.feq[i, j, k][HybridLattice3D.qinv[q]] +
+                       self.coarse_feqsolid[i, j, k][q] - self.f[i, j, k][q])
             # Fluid collision operator (BGK)
             Omega_f = -self.omega[i, j, k] * (self.f[i, j, k][q] - self.feq[i, j, k][q])
 
@@ -418,15 +406,9 @@ class HybridLattice3D(BasicLattice3D):
         self.compute_feq_solid_fine(i, j, k)
         beta = self.fine_weight[i, j, k]
 
-        for q in ti.static(range(HybridLattice3D.Q)):
-            q_inv = ti.static(HybridLattice3D.QINV_STATIC[q])
-
-            Omega_s = (
-                self.f[i, j, k][q_inv]
-                - self.feq[i, j, k][q_inv]
-                + self.fine_feqsolid[i, j, k][q]
-                - self.f[i, j, k][q]
-            )
+        for q in range(HybridLattice3D.Q):
+            Omega_s = (self.f[i, j, k][HybridLattice3D.qinv[q]] - self.feq[i, j, k][HybridLattice3D.qinv[q]] +
+                       self.fine_feqsolid[i, j, k][q] - self.f[i, j, k][q])
             Omega_f = -self.omega[i, j, k] * (self.f[i, j, k][q] - self.feq[i, j, k][q])
 
             self.fpc[i, j, k][q] = self.f[i, j, k][q] + beta * Omega_s + (1.0 - beta) * Omega_f
@@ -445,22 +427,13 @@ class HybridLattice3D(BasicLattice3D):
         beta = self.fine_weight[i, j, k]
 
         for q in range(HybridLattice3D.Q):
-            q_inv = HybridLattice3D.QINV_STATIC[q]
+            Omega_s1 = (self.f[i, j, k][HybridLattice3D.qinv[q]] - self.feq[i, j, k][HybridLattice3D.qinv[q]] +
+                       self.fine_feqsolid[i, j, k][q] - self.f[i, j, k][q])
 
-            # Fine particle operator
-            Omega_s1 = (
-                self.f[i, j, k][q_inv]
-                - self.feq[i, j, k][q_inv]
-                + self.fine_feqsolid[i, j, k][q]
-                - self.f[i, j, k][q]
-            )
+
             # Coarse particle operator
-            Omega_s2 = (
-                self.f[i, j, k][q_inv]
-                - self.feq[i, j, k][q_inv]
-                + self.coarse_feqsolid[i, j, k][q]
-                - self.f[i, j, k][q]
-            )
+            Omega_s2 = (self.f[i, j, k][HybridLattice3D.qinv[q]] - self.feq[i, j, k][HybridLattice3D.qinv[q]] +
+                        self.coarse_feqsolid[i, j, k][q] - self.f[i, j, k][q])
             # Fluid operator
             Omega_f = -self.omega[i, j, k] * (self.f[i, j, k][q] - self.feq[i, j, k][q])
 
@@ -639,7 +612,7 @@ class HybridLattice3D(BasicLattice3D):
 
                         # Torque about grain centre (r_vec: grain → cell)
                         r_vec = (Vector3(xc, yc, zc) - Vector3(i, j, k)) * self.unit.dx
-                        self.dem.gf[gid].moment_fluid += tm.cross(r_vec, Ff)
+                        self.dem.gf[gid].moment_fluid += -tm.cross(r_vec, Ff)
 
     @ti.func
     def _transfer_fine_force(self, gid: int):

@@ -278,14 +278,9 @@ class EqIMBlattice3D(BasicLattice3D):
         """
         # Update equilibrium using solid velocity
         self.compute_feq_solid(i, j, k)
-        for q in ti.static(range(self.Q)):
-            q_inv = ti.static(self.QINV_STATIC[q])
-            Omega_s = (
-                self.f[i, j, k][q_inv]
-                - self.feq[i, j, k][q_inv]
-                + self.feqsolid[i, j, k][q]
-                - self.f[i, j, k][q]
-            )
+        for q in range(EqIMBlattice3D.Q):
+            Omega_s = (self.f[i, j, k][EqIMBlattice3D.qinv[q]] - self.feq[i, j, k][EqIMBlattice3D.qinv[q]] +
+                       self.feqsolid[i, j, k][q] - self.f[i, j, k][q])
             Omega_f = -self.omega[i, j, k] * (self.f[i, j, k][q] - self.feq[i, j, k][q])
             self.fpc[i, j, k][q] = (
                 self.f[i, j, k][q]
