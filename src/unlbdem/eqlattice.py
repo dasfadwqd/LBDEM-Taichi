@@ -322,25 +322,30 @@ class EqIMBlattice3D(BasicLattice3D):
 
             fluid_vel_particle = Vector3(0.0, 0.0, 0.0)
             volfrac_particle = 0.0
+            weight_sum = 0.0  # 累积有效权重和
 
             for i in range(x_begin, x_end):
                 for j in range(y_begin, y_end):
                     for k in range(z_begin, z_end):
                         if self.CT[i, j, k] & (CellType.OBSTACLE | CellType.VEL_LADD | CellType.FREE_SLIP):
                             continue
-                        dist = ti.sqrt((xc - i) ** 2 + (yc - j) ** 2 + (zc - k) ** 2)
                         dist_x = ti.abs(xc - i)
                         dist_y = ti.abs(yc - j)
                         dist_z = ti.abs(zc - k)
-                        weight_x = self.threedelta(dist_x)
-                        weight_y = self.threedelta(dist_y)
-                        weight_z = self.threedelta(dist_z)
-                        weight = weight_x * weight_y * weight_z
+                        weight = self.threedelta(dist_x) * self.threedelta(dist_y) * self.threedelta(dist_z)
+                        if weight < 0:
+                            continue
                         fluid_vel_particle += self.vel[i, j, k] * weight
                         volfrac_particle += self.volfrac[i, j, k] * weight
+                        weight_sum += weight  # 累积权重
+
+            # 除以权重和归一化
+            if weight_sum > 1e-10:
+                fluid_vel_particle /= weight_sum
+                volfrac_particle /= weight_sum
 
             if volfrac_particle > 0:
-                eps_p = ti.min(ti.max(volfrac_particle, 0.0), 0.99)  # clamp
+                eps_p = ti.min(ti.max(volfrac_particle, 0.0), 0.99)
                 d_p = 2.0 * self.dem.gf[id].radius
                 fluid_vel = fluid_vel_particle * self.unit.dx / self.unit.dt
                 u_slip = self.dem.gf[id].velocity - fluid_vel
