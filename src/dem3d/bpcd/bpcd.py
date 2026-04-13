@@ -54,6 +54,10 @@ class BPCD:
         v = (domain_max - domain_min) / (4.0 * max_radius)
         size = int(v[0] * v[1] * v[2])
         size = next_pow2(size)
+        print("粒子数量 n =", particle_count)
+        print("最大半径 max_radius =", max_radius)
+        print("域最小值 domain_min =", domain_min)
+        print("域最大值 domain_max =", domain_max)
         return BPCD(particle_count, size, max_radius, domain_min)
 
     def detect_collision(self, positions, collision_resolve_callback=None):

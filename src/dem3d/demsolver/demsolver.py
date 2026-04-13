@@ -643,7 +643,6 @@ class DEMSolver:
         # alias
         gf = ti.static(self.gf)
         cf = ti.static(self.cf)
-
         mf = ti.static(self.mf)
 
         eval = False
@@ -651,19 +650,19 @@ class DEMSolver:
         offset = self.search_active_contact_offset(i, j)
 
         # NEW: Use periodic distance calculation
+        # 统一在最外层算好周期距离，后续所有分支共用
         distance_vec = self.get_periodic_distance_vector(gf[i].position, gf[j].position)
         distance = tm.length(distance_vec)
+        gap = distance - gf[i].radius - gf[j].radius
 
         if offset >= 0:  # Existing contact
             # Check if particles are still in contact
-            gap = tm.length(gf[j].position - gf[i].position) - gf[i].radius - gf[j].radius
             if gap < 0:  # Still in contact
                 eval = True
             else:
                 cf[offset].isActive = 0
         else:
             # Check for new contact
-            gap = tm.length(gf[j].position - gf[i].position) - gf[i].radius - gf[j].radius
             if gap < 0:  # New contact detected
                 offset = self.append_contact_offset(i)
                 if offset < 0:
@@ -680,7 +679,7 @@ class DEMSolver:
                     moment_b=Vector3(0.0, 0.0, 0.0),
                     shear_displacement=Vector3(0.0, 0.0, 0.0)
                 )
-                eval = True  # Send to evaluation using  contact model
+                eval = True  # Send to evaluation using contact model
 
         if (eval):
             dt = self.config.dt
@@ -692,7 +691,7 @@ class DEMSolver:
             v = tm.cross(a, b)
             s = tm.length(v)
             c = tm.dot(a, b)
-            rotationMatrix = Zero3x3();
+            rotationMatrix = Zero3x3()
             if (s < DoublePrecisionTolerance):
                 if (c > 0.0):
                     rotationMatrix = ti.Matrix.diag(3, 1.0)
@@ -702,33 +701,30 @@ class DEMSolver:
                 vx = DEMMatrix([[0.0, -v[2], v[1]], [v[2], 0.0, -v[0]], [-v[1], v[0], 0.0]])
                 rotationMatrix = ti.Matrix.diag(3, 1.0) + vx + ((1.0 - c) / s ** 2) * vx @ vx
 
-            length = tm.length(gf[j].position - gf[i].position)
-
-            gap = length - gf[i].radius - gf[j].radius  # gap must be negative to ensure an intact contact
-            delta_n = -1 * gap  # For parameter calculation only
+            delta_n = -gap  # For parameter calculation only
 
             # For debug only
             if delta_n > 0.05 * ti.min(gf[i].radius, gf[j].radius):
                 print("WARNING: Overlap particle-particle exceeds 0.05")
 
-            cf[offset].position = gf[i].position + tm.normalize(gf[j].position - gf[i].position) * (
-                    gf[i].radius - delta_n)
+            cf[offset].position = gf[i].position + a * (gf[i].radius - delta_n)
             r_i = cf[offset].position - gf[i].position
-            r_j = cf[offset].position - gf[j].position
+            # MODIFIED: Use image position of j to correctly compute r_j across periodic boundary
+            # pos_j_image is the virtual position of j as seen from i's side of the boundary
+            pos_j_image = gf[i].position + distance_vec
+            r_j = cf[offset].position - pos_j_image
 
             # Velocity of a point on the surface of a rigid body
             v_c_i = tm.cross(gf[i].omega, r_i) + gf[i].velocity
             v_c_j = tm.cross(gf[j].omega, r_j) + gf[j].velocity
             v_c = rotationMatrix @ (v_c_j - v_c_i)  # LOCAL coordinate
 
-            # Parameter calculation
-
             # Contact model
-            F = self.contact_model.particle_particle_force(i, j, gf, cf, offset, dt ,delta_n, v_c)
+            F = self.contact_model.particle_particle_force(i, j, gf, cf, offset, dt, delta_n, v_c)
 
             # For P4C output
             cf[offset].force_a = F
-            # cf[offset].force_b = -F;
+            # cf[offset].force_b = -F
             # Assigning contact force to particles
             # Notice the inverse of signs due to Newton's third law
             # and LOCAL to GLOBAL coordinates
