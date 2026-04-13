@@ -650,8 +650,6 @@ class DEMSolver:
         offset = self.search_active_contact_offset(i, j)
 
         # NEW: Use periodic distance calculation
-
-
         distance_vec = self.get_periodic_distance_vector(gf[i].position, gf[j].position)
         distance = tm.length(distance_vec)
         gap = distance - gf[i].radius - gf[j].radius
