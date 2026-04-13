@@ -50,6 +50,7 @@ class BPCD:
         """
         Factory method to initialize BPCD with a hash table size based on domain volume.
         Table size is rounded up to the next power of two for efficient modulo via bit masking.
+
         """
         v = (domain_max - domain_min) / (4.0 * max_radius)
         size = int(v[0] * v[1] * v[2])
