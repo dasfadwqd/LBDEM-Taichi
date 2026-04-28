@@ -1,6 +1,7 @@
 """
 Unresolved LBM-DEM coupling simulation based on the particle equivalence method
 proposed by Prof. Limin Wang (DOI: https://doi.org/10.1016/j.cej.2023.142898).
+https://doi.org/10.1016/j.ces.2026.123562
 This implementation combines Lattice Boltzmann Method (LBM) for fluid dynamics
 and Discrete Element Method (DEM) for particle motion, using a modified
 Immersed Boundary Method (IBM) with unresolved grid resolution (dx > particle size).
@@ -103,9 +104,19 @@ class EqIMBlattice3D(BasicLattice3D):
     @ti.kernel
     def grains2lattice(self):
         """
-        Map particle data to lattice using kernel interpolation with boundary-aware redistribution.
+        Map particle data (eps_s, u_s) to lattice using threedelta kernel with
+        mirror-particle boundary treatment.
 
-        Ensures conservation by redistributing weights from excluded boundary nodes to valid ones.
+        Replaces the original correction_factor approach with the normalized weight
+        formulation of Zhu et al. (2026):
+
+          Eq.(16): w_{i,j} = W_bar_{i,j} * V_j / sum_j W_bar_{i,j} * V_j
+                   (V_j = 1 lu^3; W_bar includes mirror correction per Eq.22)
+          Eq.(17): eps_{i,j} = w_{i,j} * V_{part,i} / V_lattice
+          Eq.(18): u_{i,j}   = u_{part,i} * eps_{i,j}
+
+        After accumulation over all particles:
+          u_s[node] = sum(u_{i,j}) / sum(eps_{i,j})   (momentum-weighted solid velocity)
         """
         self.volfrac.fill(0.0)
         self.velsolid.fill(0.0)
@@ -113,82 +124,72 @@ class EqIMBlattice3D(BasicLattice3D):
         self.weight_sum.fill(0.0)
 
         V_lattice = self.unit.dx ** 3
+        support = 1.5  # threedelta support radius in lattice units
 
-        for id in range(self.dem.gf.shape[0]):
-            # Convert particle position to lattice coordinates
-            xc = (self.dem.gf[id].position[0] - self.dem.config.domain.xmin + 0.5 * self.unit.dx) / self.unit.dx
-            yc = (self.dem.gf[id].position[1] - self.dem.config.domain.ymin + 0.5 * self.unit.dx) / self.unit.dx
-            zc = (self.dem.gf[id].position[2] - self.dem.config.domain.zmin + 0.5 * self.unit.dx) / self.unit.dx
-            r = self.dem.gf[id].radius / self.unit.dx
-            V_grain = 4.0 / 3.0 * tm.pi * self.dem.gf[id].radius ** 3
-            vel_lattice = self.dem.gf[id].velocity * self.unit.dt / self.unit.dx
+        for pid in range(self.dem.gf.shape[0]):
+            # Physical position -> lattice coordinates
+            xc = (self.dem.gf[pid].position[0] - self.dem.config.domain.xmin
+                  + 0.5 * self.unit.dx) / self.unit.dx
+            yc = (self.dem.gf[pid].position[1] - self.dem.config.domain.ymin
+                  + 0.5 * self.unit.dx) / self.unit.dx
+            zc = (self.dem.gf[pid].position[2] - self.dem.config.domain.zmin
+                  + 0.5 * self.unit.dx) / self.unit.dx
 
-            support_radius = 1.5
-            i_min = ti.max(0, ti.cast(xc - support_radius, ti.i32))
-            i_max = ti.min(self.Nx, ti.cast(xc + support_radius + 1, ti.i32))
-            j_min = ti.max(0, ti.cast(yc - support_radius, ti.i32))
-            j_max = ti.min(self.Ny, ti.cast(yc + support_radius + 1, ti.i32))
-            k_min = ti.max(0, ti.cast(zc - support_radius, ti.i32))
-            k_max = ti.min(self.Nz, ti.cast(zc + support_radius + 1, ti.i32))
+            V_part = 4.0 / 3.0 * tm.pi * self.dem.gf[pid].radius ** 3
+            vel_lu = self.dem.gf[pid].velocity * self.unit.dt / self.unit.dx
 
-            # =====================================
-            # First Pass: Calculate total weights (including boundaries)
-            # =====================================
-            total_weight = 0.0  # Total weight including boundary nodes
-            valid_weight = 0.0  # Weight only from valid nodes
+            # Support region (threedelta: +/- 1.5 lu)
+            i_min = ti.max(0, ti.cast(xc - support, ti.i32))
+            i_max = ti.min(self.Nx, ti.cast(xc + support + 1, ti.i32))
+            j_min = ti.max(0, ti.cast(yc - support, ti.i32))
+            j_max = ti.min(self.Ny, ti.cast(yc + support + 1, ti.i32))
+            k_min = ti.max(0, ti.cast(zc - support, ti.i32))
+            k_max = ti.min(self.Nz, ti.cast(zc + support + 1, ti.i32))
 
-            for i in range(i_min, i_max):
-                for j in range(j_min, j_max):
-                    for k in range(k_min, k_max):
-                        dist_x = ti.abs(xc - i)
-                        dist_y = ti.abs(yc - j)
-                        dist_z = ti.abs(zc - k)
-                        weight_x = self.threedelta(dist_x)
-                        weight_y = self.threedelta(dist_y)
-                        weight_z = self.threedelta(dist_z)
-                        weight  = weight_x * weight_y * weight_z
-                        if weight < 0:
+            # ── Pass 1: denominator sum_j W_bar_{i,j} * V_j  (Eq.16) ──
+            denom = 0.0
+            for ii in range(i_min, i_max):
+                for jj in range(j_min, j_max):
+                    for kk in range(k_min, k_max):
+                        if self.CT[ii, jj, kk] & (CellType.OBSTACLE
+                                                  | CellType.VEL_LADD
+                                                  | CellType.FREE_SLIP):
                             continue
-                        total_weight += weight
-                        if not (self.CT[i, j, k] & (CellType.OBSTACLE | CellType.VEL_LADD | CellType.FREE_SLIP)):
-                            valid_weight += weight
+                        w_bar = self._kernel_with_mirror(xc, yc, zc, ii, jj, kk)
+                        if w_bar < 0.0:
+                            continue
+                        denom += w_bar  # V_j = 1 lu^3
 
-            # =====================================
-            # Second Pass: Redistribute weights to valid nodes
-            # =====================================
-            if valid_weight > 0:  # Only proceed if there are valid nodes
-                # Correction factor to redistribute boundary weights
-                correction_factor = total_weight / valid_weight
-                for i in range(i_min, i_max):
-                    for j in range(j_min, j_max):
-                        for k in range(k_min, k_max):
-                            if self.CT[i, j, k] & (CellType.OBSTACLE | CellType.VEL_LADD | CellType.FREE_SLIP):
-                                continue
-                            dist = ti.sqrt((xc - i)**2 + (yc - j)**2 + (zc - k)**2)
-                            dist_x = ti.abs(xc - i)
-                            dist_y = ti.abs(yc - j)
-                            dist_z = ti.abs(zc - k)
-                            weight_x = self.threedelta(dist_x)
-                            weight_y = self.threedelta(dist_y)
-                            weight_z = self.threedelta(dist_z)
-                            weight_raw = weight_x * weight_y * weight_z
-                            if weight_raw < 0:
-                                continue
-                            weight_corrected = weight_raw * correction_factor
-                            volume_contribution = weight_corrected * V_grain / V_lattice
-                            ti.atomic_add(self.volfrac[i, j, k], volume_contribution)
-                            ti.atomic_add(self.velsum[i, j, k], weight_corrected * vel_lattice)
-                            ti.atomic_add(self.weight_sum[i, j, k], weight_corrected)
+            if denom < 1e-30:
+                continue  # no valid neighbours
 
-        # =====================================
-        # Normalize velocity field
-        # =====================================
+            # ── Pass 2: distribute using normalized weight (Eq.16-18) ──
+            for ii in range(i_min, i_max):
+                for jj in range(j_min, j_max):
+                    for kk in range(k_min, k_max):
+                        if self.CT[ii, jj, kk] & (CellType.OBSTACLE
+                                                  | CellType.VEL_LADD
+                                                  | CellType.FREE_SLIP):
+                            continue
+                        w_bar = self._kernel_with_mirror(xc, yc, zc, ii, jj, kk)
+                        if w_bar < 0.0:
+                            continue
+
+                        w_norm = w_bar / denom  # Eq.(16)
+                        eps_ij = w_norm * V_part / V_lattice  # Eq.(17)
+                        u_ij = vel_lu * eps_ij  # Eq.(18)
+
+                        ti.atomic_add(self.volfrac[ii, jj, kk], eps_ij)
+                        ti.atomic_add(self.velsum[ii, jj, kk], u_ij)
+                        ti.atomic_add(self.weight_sum[ii, jj, kk], w_norm)
+
+        # ── Recover solid velocity u_s = sum(u_{i,j}) / sum(eps_{i,j}) ──
         for i, j, k in ti.ndrange(self.Nx, self.Ny, self.Nz):
-            if self.volfrac[i, j, k] >= 1:
+            if self.volfrac[i, j, k] >= 1.0:
                 self.volfrac[i, j, k] = 0.99
                 print("Warning: volfrac[{}, {}, {}] >= 1.0".format(i, j, k))
-            if self.weight_sum[i, j, k] > 1e-10:
-                self.velsolid[i, j, k] = self.velsum[i, j, k] / self.weight_sum[i, j, k]
+            if self.volfrac[i, j, k] > 1e-15:
+                self.velsolid[i, j, k] = self.velsum[i, j, k] / self.volfrac[i, j, k]
 
     # =====================================
     # Compute Weight Coefficient
@@ -305,52 +306,81 @@ class EqIMBlattice3D(BasicLattice3D):
 
     @ti.kernel
     def lattice2grains(self):
-        """Interpolate hydrodynamic drag force from lattice to DEM particles."""
+        """
+        Interpolate fluid properties from lattice to DEM particle positions.
+
+        Implements Eq.(19-21) of Zhu et al. (2026):
+          Eq.(19): u_fluid_i = sum_j (w_{i,j} * u_j)   / sum_j w_{i,j}
+          Eq.(20): rho_fluid_i = sum_j (w_{i,j} * rho_j) / sum_j w_{i,j}
+          Eq.(21): eps_fluid_i = sum_j eps_{i,j} / N_lattice  (arithmetic mean)
+
+        The same mirror-extended kernel W_bar (Eq.22) is used for consistency
+        with grains2lattice (fluid->solid range = solid->fluid range, Sec.3.1.3).
+        """
         self.dem.gf.force_fluid.fill(0.0)
 
-        for id in ti.ndrange(self.dem.gf.shape[0]):
-            xc = (self.dem.gf[id].position[0] - self.dem.config.domain.xmin + 0.5 * self.unit.dx) / self.unit.dx
-            yc = (self.dem.gf[id].position[1] - self.dem.config.domain.ymin + 0.5 * self.unit.dx) / self.unit.dx
-            zc = (self.dem.gf[id].position[2] - self.dem.config.domain.zmin + 0.5 * self.unit.dx) / self.unit.dx
+        support = 1.5  # threedelta support radius in lattice units
 
-            x_begin = ti.max(0, int(xc - 2))
-            x_end = ti.min(self.Nx, int(xc + 2))
-            y_begin = ti.max(0, int(yc - 2))
-            y_end = ti.min(self.Ny, int(yc + 2))
-            z_begin = ti.max(0, int(zc - 2))
-            z_end = ti.min(self.Nz, int(zc + 2))
+        for pid in ti.ndrange(self.dem.gf.shape[0]):
+            xc = (self.dem.gf[pid].position[0] - self.dem.config.domain.xmin
+                  + 0.5 * self.unit.dx) / self.unit.dx
+            yc = (self.dem.gf[pid].position[1] - self.dem.config.domain.ymin
+                  + 0.5 * self.unit.dx) / self.unit.dx
+            zc = (self.dem.gf[pid].position[2] - self.dem.config.domain.zmin
+                  + 0.5 * self.unit.dx) / self.unit.dx
 
-            fluid_vel_particle = Vector3(0.0, 0.0, 0.0)
-            volfrac_particle = 0.0
-            weight_sum = 0.0  # 累积有效权重和
+            x_begin = ti.max(0, ti.cast(xc - support, ti.i32))
+            x_end = ti.min(self.Nx, ti.cast(xc + support + 1, ti.i32))
+            y_begin = ti.max(0, ti.cast(yc - support, ti.i32))
+            y_end = ti.min(self.Ny, ti.cast(yc + support + 1, ti.i32))
+            z_begin = ti.max(0, ti.cast(zc - support, ti.i32))
+            z_end = ti.min(self.Nz, ti.cast(zc + support + 1, ti.i32))
 
-            for i in range(x_begin, x_end):
-                for j in range(y_begin, y_end):
-                    for k in range(z_begin, z_end):
-                        if self.CT[i, j, k] & (CellType.OBSTACLE | CellType.VEL_LADD | CellType.FREE_SLIP):
+            # Accumulators
+            vel_wsum = Vector3(0.0, 0.0, 0.0)  # sum w_{i,j}*u_j   — Eq.(19) numerator
+            rho_wsum = 0.0  # sum w_{i,j}*rho_j — Eq.(20) numerator
+            eps_sum = 0.0  # sum eps_{i,j}     — Eq.(21) numerator
+            w_total = 0.0  # sum w_{i,j}       — Eq.(19,20) denominator
+            n_lattice = 0  # N_lattice         — Eq.(21) denominator
+
+            for ii in range(x_begin, x_end):
+                for jj in range(y_begin, y_end):
+                    for kk in range(z_begin, z_end):
+                        if self.CT[ii, jj, kk] & (CellType.OBSTACLE
+                                                  | CellType.VEL_LADD
+                                                  | CellType.FREE_SLIP):
                             continue
-                        dist_x = ti.abs(xc - i)
-                        dist_y = ti.abs(yc - j)
-                        dist_z = ti.abs(zc - k)
-                        weight = self.threedelta(dist_x) * self.threedelta(dist_y) * self.threedelta(dist_z)
-                        if weight < 0:
+                        w_ij = self._kernel_with_mirror(xc, yc, zc, ii, jj, kk)
+                        if w_ij < 0.0:
                             continue
-                        fluid_vel_particle += self.vel[i, j, k] * weight
-                        volfrac_particle += self.volfrac[i, j, k] * weight
-                        weight_sum += weight  # 累积权重
 
-            # 除以权重和归一化
-            if weight_sum > 1e-10:
-                fluid_vel_particle /= weight_sum
-                volfrac_particle /= weight_sum
+                        vel_wsum += self.vel[ii, jj, kk] * w_ij
+                        rho_wsum += self.rho[ii, jj, kk] * w_ij
+                        eps_sum +=(1.0 - self.volfrac[ii, jj, kk] )
+                        w_total += w_ij
+                        n_lattice += 1
 
-            if volfrac_particle > 0:
-                eps_p = ti.min(ti.max(volfrac_particle, 0.0), 0.99)
-                d_p = 2.0 * self.dem.gf[id].radius
-                fluid_vel = fluid_vel_particle * self.unit.dx / self.unit.dt
-                u_slip = self.dem.gf[id].velocity - fluid_vel
+            # Recover fluid quantities at particle location
+            fluid_vel = Vector3(0.0, 0.0, 0.0)
+            eps_fluid = 0.0
+
+            if w_total > 1e-15:
+                # Eq.(19): u_fluid = sum(w*u) / sum(w), convert lu -> physical
+                fluid_vel = vel_wsum / w_total * self.unit.dx / self.unit.dt
+                # Eq.(20): rho_fluid = sum(w*rho) / sum(w)  [available if needed]
+                # fluid_rho = rho_wsum / w_total
+
+            if n_lattice > 0:
+                # Eq.(21): eps_fluid = sum(eps_{i,j}) / N_lattice
+                eps_fluid = eps_sum / float(n_lattice)
+
+            # Drag force
+            if 1.0 - eps_fluid > 1e-15:
+                eps_p = 1.0 - eps_fluid
+                d_p = 2.0 * self.dem.gf[pid].radius
+                u_slip = self.dem.gf[pid].velocity - fluid_vel
                 F_d = self.compute_drag_force(d_p, u_slip, eps_p)
-                self.dem.gf[id].force_fluid += F_d
+                self.dem.gf[pid].force_fluid += F_d
 
     # =====================================
     # Drag Force Model
@@ -483,6 +513,78 @@ class EqIMBlattice3D(BasicLattice3D):
             a = 0.0
         return a
 
+    # =====================================
+    # Mirror-Particle Kernel Helper
+    # =====================================
+
+    @ti.func
+    def _kernel_with_mirror(self, xc: float, yc: float, zc: float,
+                            ii: int, jj: int, kk: int) -> float:
+        """
+        Evaluate mirror-extended kernel W_bar = W(x_p) + W(x'_p) at lattice node (ii,jj,kk).
+
+        Implements boundary treatment Eq.(22) of Zhu et al. (2026):
+          W_bar = W(x_p) + W(x'_p)
+        where x'_p is the mirror image of x_p reflected about the nearest domain wall.
+
+        This folds the truncated kernel lobe back into the domain, preventing
+        underestimation of solid volume fraction at boundary nodes (cf. Fig.4 in paper).
+        The threedelta kernel has support radius 1.5 lu, so mirror correction is
+        triggered when the particle centre is within 1.5 lu of any wall.
+
+        Args:
+            xc, yc, zc (float): Particle centre in lattice coordinates.
+            ii, jj, kk (int):   Target lattice node indices.
+
+        Returns:
+            float: Mirror-corrected kernel weight W_bar.
+        """
+        support = 1.5  # threedelta support radius in lattice units
+
+        # Primary distances
+        dx_p = ti.abs(xc - ii)
+        dy_p = ti.abs(yc - jj)
+        dz_p = ti.abs(zc - kk)
+
+        dist = ti.sqrt((xc - ii) ** 2 + (yc - jj) ** 2 + (zc - kk) ** 2)
+
+        # W(x_p) -- primary contribution
+        w_primary = self.threedelta(dist)
+
+        # W(x'_p) -- mirror contributions (Eq.22)
+        w_mirror = 0.0
+
+        # -- x walls --
+        if xc < support:  # near left wall (i = 0)
+            xc_mir = -xc
+            dist = ti.sqrt((xc_mir - ii) ** 2 + (yc - jj) ** 2 + (zc - kk) ** 2)
+            w_mirror += self.threedelta(dist)
+        if xc > float(self.Nx) - support:  # near right wall (i = Nx)
+            xc_mir = 2.0 * float(self.Nx) - xc
+            dist = ti.sqrt((xc_mir - ii) ** 2 + (yc - jj) ** 2 + (zc - kk) ** 2)
+            w_mirror += self.threedelta(dist)
+
+        # -- y walls --
+        if yc < support:
+            yc_mir = -yc
+            dist = ti.sqrt((yc_mir - ii) ** 2 + (yc - jj) ** 2 + (zc - kk) ** 2)
+            w_mirror += self.threedelta(dist)
+        if yc > float(self.Ny) - support:
+            yc_mir = 2.0 * float(self.Ny) - yc
+            dist = ti.sqrt((yc_mir - ii) ** 2 + (yc - jj) ** 2 + (zc - kk) ** 2)
+            w_mirror += self.threedelta(dist)
+
+        # -- z walls --
+        if zc < support:
+            zc_mir = -zc
+            dist = ti.sqrt((zc_mir - ii) ** 2 + (yc - jj) ** 2 + (zc - kk) ** 2)
+            w_mirror += self.threedelta(dist)
+        if zc > float(self.Nz) - support:
+            zc_mir = 2.0 * float(self.Nz) - zc
+            dist = ti.sqrt((zc_mir - ii) ** 2 + (yc - jj) ** 2 + (zc - kk) ** 2)
+            w_mirror += self.threedelta(dist)
+
+        return w_primary + w_mirror  # W_bar = W(x_p) + W(x'_p),
     # =====================================
     # High-Level Interface
     # =====================================
