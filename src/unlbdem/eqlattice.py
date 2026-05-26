@@ -356,7 +356,7 @@ class EqIMBlattice3D(BasicLattice3D):
 
                         vel_wsum += self.vel[ii, jj, kk] * w_ij
                         rho_wsum += self.rho[ii, jj, kk] * w_ij
-                        eps_sum +=(1.0 - self.volfrac[ii, jj, kk] ) * w_ij
+                        eps_sum +=(1.0 - self.volfrac[ii, jj, kk] )
                         w_total += w_ij
                         n_lattice += 1
 
@@ -540,9 +540,6 @@ class EqIMBlattice3D(BasicLattice3D):
             float: Mirror-corrected kernel weight W_bar.
         """
         support = 1.5  # threedelta support radius in lattice units
-
-        # Primary distances
-
         dist = ti.sqrt((xc - ii) ** 2 + (yc - jj) ** 2 + (zc - kk) ** 2)
 
         # W(x_p) -- primary contribution
@@ -550,16 +547,18 @@ class EqIMBlattice3D(BasicLattice3D):
 
         # W(x'_p) -- mirror contributions (Eq.22)
         w_mirror = 0.0
-
+        #
         # -- x walls --
         if xc < support:  # near left wall (i = 0)
             xc_mir = -xc
-            dist = ti.sqrt((xc_mir - ii) ** 2 + (yc - jj) ** 2 + (zc - kk) ** 2)
-            w_mirror += self.threedelta(dist)
+            w_mirror += (self.threedelta(ti.abs(xc_mir - ii)) *
+                         self.threedelta(ti.abs(yc - jj)) *
+                         self.threedelta(ti.abs(zc - kk)))
         if xc > float(self.Nx -1) - support:  # near right wall (i = Nx -1)
             xc_mir = 2.0 * float(self.Nx -1) - xc
-            dist = ti.sqrt((xc_mir - ii) ** 2 + (yc - jj) ** 2 + (zc - kk) ** 2)
-            w_mirror += self.threedelta(dist)
+            w_mirror += (self.threedelta(ti.abs(xc_mir - ii)) *
+                         self.threedelta(ti.abs(yc - jj)) *
+                         self.threedelta(ti.abs(zc - kk)))
 
         # -- y walls --
         if yc < support:
@@ -574,12 +573,14 @@ class EqIMBlattice3D(BasicLattice3D):
         # -- z walls --
         if zc < support:
             zc_mir = -zc
-            dist = ti.sqrt((xc - ii)**2 + (yc - jj)**2 + (zc_mir - kk)**2)
-            w_mirror += self.threedelta(dist)
+            w_mirror += (self.threedelta(ti.abs(xc - ii)) *
+                         self.threedelta(ti.abs(yc - jj)) *
+                         self.threedelta(ti.abs(zc_mir - kk)))
         if zc > float(self.Nz-1) - support:
             zc_mir = 2.0 * float(self.Nz-1) - zc
-            dist = ti.sqrt((xc - ii)**2 + (yc - jj)**2 + (zc_mir - kk)**2)
-            w_mirror += self.threedelta(dist)
+            w_mirror += (self.threedelta(ti.abs(xc - ii)) *
+                         self.threedelta(ti.abs(yc - jj)) *
+                         self.threedelta(ti.abs(zc_mir - kk)))
 
         return w_primary + w_mirror  # W_bar = W(x_p) + W(x'_p),
     # =====================================

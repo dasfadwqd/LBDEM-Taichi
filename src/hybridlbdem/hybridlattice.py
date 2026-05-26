@@ -53,9 +53,6 @@ class HybridLattice3D(BasicLattice3D):
     most appropriate coupling strategy automatically.
     """
 
-    # D3Q19 inverse direction table (static for kernel inlining)
-    QINV_STATIC = (0, 2, 1, 4, 3, 6, 5, 8, 7, 10, 9, 12, 11, 14, 13, 16, 15, 18, 17)
-
     def __init__(
         self,
         Nx: int, Ny: int, Nz: int,
@@ -238,15 +235,23 @@ class HybridLattice3D(BasicLattice3D):
         """
         Map unresolved (fine) grains using a regularised IBM kernel.
 
-        Uses the 3-point delta function with support radius 1.5 dx.
-        Includes boundary correction for weight redistribution.
-        Only grains with diameter ≤ dx contribute here.
+        Volume fraction correction:
+            eps_fine_ij = w_norm * (1 - eps_coarse_ij) * V_grain / (D_corrected * V_lattice)
+        where D_corrected = sum_j[ w_norm_ij * (1 - eps_coarse_ij) ]
+        ensures volume conservation in the presence of coarse particles.
+
+        Note: Nodes fully occupied by coarse particles (eps_coarse >= 1.0) are
+        skipped entirely to avoid floating-point residuals triggering false warnings.
         """
+        # ------------------------------------------------------------------ #
+        # Reset fields
+        # ------------------------------------------------------------------ #
         self.fine_volfrac.fill(0.0)
         self.fine_velsum.fill(0.0)
         self.fine_weightsum.fill(0.0)
 
         V_lattice = self.unit.dx ** 3
+        support_radius = 1.5
 
         for gid in range(self.dem.gf.shape[0]):
             # Filter: Skip coarse particles
@@ -260,9 +265,8 @@ class HybridLattice3D(BasicLattice3D):
 
             V_grain = 4.0 / 3.0 * tm.pi * self.dem.gf[gid].radius ** 3
             vel_lattice = self.dem.gf[gid].velocity * self.unit.dt / self.unit.dx
-            support_radius = 1.5
 
-            # Determine search bounds
+            # Search bounds
             i_min = ti.max(0, ti.cast(xc - support_radius, ti.i32))
             i_max = ti.min(self.Nx, ti.cast(xc + support_radius + 1, ti.i32))
             j_min = ti.max(0, ti.cast(yc - support_radius, ti.i32))
@@ -270,58 +274,98 @@ class HybridLattice3D(BasicLattice3D):
             k_min = ti.max(0, ti.cast(zc - support_radius, ti.i32))
             k_max = ti.min(self.Nz, ti.cast(zc + support_radius + 1, ti.i32))
 
-            # Pass 1: Calculate total vs valid weight (for boundary correction)
-            total_w = 0.0
-            valid_w = 0.0
+            # ---------------------------------------------------------------- #
+            # Pass 1: kernel normalisation denominator (geometry only)
+            # denom = sum_j[ W_bar(x_p - x_j) ]
+            # Skip nodes fully occupied by coarse particles
+            # ---------------------------------------------------------------- #
+            denom = 0.0
             for i in range(i_min, i_max):
                 for j in range(j_min, j_max):
                     for k in range(k_min, k_max):
-                        dist_x = ti.abs(xc - i)
-                        dist_y = ti.abs(yc - j)
-                        dist_z = ti.abs(zc - k)
-
-                        w = self._threedelta(dist_x) * self._threedelta(dist_y) * self._threedelta(dist_z)
-                        if w <= 0.0:
+                        if self.CT[i, j, k] & (CellType.OBSTACLE |
+                                               CellType.VEL_LADD |
+                                               CellType.FREE_SLIP):
                             continue
+                        if self.coarse_volfrac[i, j, k] >= 1.0:
+                            continue
+                        w_bar = self._kernel_with_mirror(xc, yc, zc, i, j, k)
+                        if w_bar > 0.0:
+                            denom += w_bar
 
-                        total_w += w
-                        if not (self.CT[i, j, k] & (CellType.OBSTACLE | CellType.VEL_LADD | CellType.FREE_SLIP)):
-                            valid_w += w
-
-            if valid_w < 1e-12:
+            if denom < 1e-30:
                 continue
 
-            corr = total_w / valid_w  # Redistribution factor
-
-            # Pass 2: Accumulate into lattice fields
+            # ---------------------------------------------------------------- #
+            # Pass 2: corrected denominator accounting for coarse occupation
+            # D_corrected = sum_j[ w_norm_ij * (1 - eps_coarse_ij) ]
+            # Skip nodes fully occupied by coarse particles
+            # ---------------------------------------------------------------- #
+            denom_corrected = 0.0
             for i in range(i_min, i_max):
                 for j in range(j_min, j_max):
                     for k in range(k_min, k_max):
-                        if self.CT[i, j, k] & (CellType.OBSTACLE | CellType.VEL_LADD | CellType.FREE_SLIP):
+                        if self.CT[i, j, k] & (CellType.OBSTACLE |
+                                               CellType.VEL_LADD |
+                                               CellType.FREE_SLIP):
+                            continue
+                        if self.coarse_volfrac[i, j, k] >= 1.0:
+                            continue
+                        w_bar = self._kernel_with_mirror(xc, yc, zc, i, j, k)
+                        if w_bar <= 0.0:
+                            continue
+                        w_norm = w_bar / denom
+                        avail = 1.0 - self.coarse_volfrac[i, j, k]
+                        denom_corrected += w_norm * avail
+
+            if denom_corrected < 1e-30:
+                continue
+
+            # ---------------------------------------------------------------- #
+            # Pass 3: accumulate corrected volume fraction and velocity
+            # eps_fine_ij = w_norm * avail_ij / denom_corrected * V_grain / V_lattice
+            # Skip nodes fully occupied by coarse particles
+            # ---------------------------------------------------------------- #
+            for i in range(i_min, i_max):
+                for j in range(j_min, j_max):
+                    for k in range(k_min, k_max):
+                        if self.CT[i, j, k] & (CellType.OBSTACLE |
+                                               CellType.VEL_LADD |
+                                               CellType.FREE_SLIP):
+                            continue
+                        if self.coarse_volfrac[i, j, k] >= 1.0:
+                            continue
+                        w_bar = self._kernel_with_mirror(xc, yc, zc, i, j, k)
+                        if w_bar <= 0.0:
                             continue
 
-                        dist_x = ti.abs(xc - i)
-                        dist_y = ti.abs(yc - j)
-                        dist_z = ti.abs(zc - k)
+                        w_norm = w_bar / denom
+                        avail = 1.0 - self.coarse_volfrac[i, j, k]
+                        eps_ij = w_norm * avail / denom_corrected * V_grain / V_lattice
 
-                        w = self._threedelta(dist_x) * self._threedelta(dist_y) * self._threedelta(dist_z)
-                        if w <= 0.0:
-                            continue
+                        ti.atomic_add(self.fine_volfrac[i, j, k], eps_ij)
+                        ti.atomic_add(self.fine_velsum[i, j, k], vel_lattice * eps_ij)
+                        ti.atomic_add(self.fine_weightsum[i, j, k], w_norm)
 
-                        w_c = w * corr
-                        ti.atomic_add(self.fine_volfrac[i, j, k], w_c * V_grain / V_lattice)
-                        ti.atomic_add(self.fine_velsum[i, j, k], w_c * vel_lattice)
-                        ti.atomic_add(self.fine_weightsum[i, j, k], w_c)
-
-        # Normalise velocity and clamp volume fraction
+        # ------------------------------------------------------------------ #
+        # Normalise solid velocity; clamp volume fraction
+        # ------------------------------------------------------------------ #
         for i, j, k in ti.ndrange(self.Nx, self.Ny, self.Nz):
-            if self.fine_volfrac[i, j, k] >= 1.0:
-                self.fine_volfrac[i, j, k] = 0.9999
-                # Warning printed inside kernel for debugging
-                print("Warning: fine particles volfrac[{}, {}, {}] >= 1.0".format(i, j, k))
+            avail = 1.0 - self.coarse_volfrac[i, j, k]
 
-            if self.fine_weightsum[i, j, k] > 1e-10:
-                self.fine_velsolid[i, j, k] = self.fine_velsum[i, j, k] / self.fine_weightsum[i, j, k]
+            if self.fine_volfrac[i, j, k] > avail:
+                # Only print for physically meaningful overflow (not float residuals)
+                if self.fine_volfrac[i, j, k] - avail > 1e-6:
+                    print("Warning: physical overflow at ({},{},{}): fine={}, coarse={}".format(
+                        i, j, k,
+                        self.fine_volfrac[i, j, k],
+                        self.coarse_volfrac[i, j, k]))
+                self.fine_volfrac[i, j, k] = ti.max(0.0, avail - 0.01)
+
+            if self.fine_volfrac[i, j, k] > 1e-10:
+                self.fine_velsolid[i, j, k] = (
+                        self.fine_velsum[i, j, k] / self.fine_volfrac[i, j, k]
+                )
 
     # ======================================================================
     # Collision Step
@@ -491,7 +535,8 @@ class HybridLattice3D(BasicLattice3D):
                 continue
 
             svf = self.fine_volfrac[i, j, k]
-            if svf > 0.0:
+            fvf = 1- self.fine_volfrac[i, j, k] -self.coarse_volfrac[i, j, k]
+            if svf > 0.0 :
                 V_lattice = self.unit.dx ** 3
                 # Effective particle radius from volume fraction
                 R_eff = ti.pow(3.0 * V_lattice * svf / (4.0 * tm.pi), 1.0 / 3.0)
@@ -501,46 +546,47 @@ class HybridLattice3D(BasicLattice3D):
                 v_slip = ((self.fine_velsolid[i, j, k] - self.vel[i, j, k])
                           * self.unit.dx / self.unit.dt)
 
-                self.fine_weight[i, j, k] = self._tenneti_weight(d_eff, v_slip, svf)
+                self.fine_weight[i, j, k] = self._tenneti_weight(d_eff, v_slip, fvf)
 
-                if self.fine_weight[i, j, k] > 1.0:
-                    print("Warning:fine weight[{}, {}, {}] > 1.0".format(i, j, k))
+                # if self.fine_weight[i, j, k] > 1.0:
+                #     print("Warning:fine weight[{}, {}, {}] > 1.0".format(i, j, k))
 
     @ti.func
-    def _tenneti_weight(self, dp: float, u_slip: Vector3, svf: float) -> float:
+    def _tenneti_weight(self, dp: float, u_slip: Vector3, fvf: float) -> float:
         """
         Calculate Tenneti weight W_d (dimensionless, lattice units).
-        W_d = 3π d_p^L ν_L (1-ε) C_d
+        fvf: fluid volume fraction (ε_f)
+        W_d = 3π d_p^L ν_L ε_f C_d
         """
         u_mag = tm.length(u_slip)
-        Re_p = (1.0 - svf) * self.rho0 * dp * u_mag / self.mu
+        Re_p = fvf * self.rho0 * dp * u_mag / self.mu
 
         # Compute Drag Coefficient Cd
-        Cd = self._compute_tenneti_Cd(Re_p, svf)
+        Cd = self._compute_tenneti_Cd(Re_p, fvf)
 
         dp_L = dp / self.unit.dx  # Diameter in lattice units
-        Wd = 3.0 * tm.pi * dp_L * self.nuLu * (1.0 - svf) * Cd
+        Wd = 3.0 * tm.pi * dp_L * self.nuLu * fvf * Cd
         return Wd
 
     @ti.func
-    def _compute_tenneti_Cd(self, Re_p: float, svf: float) -> float:
+    def _compute_tenneti_Cd(self, Re_p: float, fvf: float) -> float:
         """
         Shared helper for Tenneti Drag Coefficient calculation.
         Used by both weight calculation and force calculation.
         """
         Cd = 0.0
-        if (1.0 - svf) > 1e-9:
+        if fvf > 1e-9:
             Cd0 = 1.0 + 0.15 * tm.pow(Re_p, 0.687)
 
             # Static correction term A(ε_p)
-            A_eps = (5.81 * svf / (1.0 - svf)**3
-                     + 0.48 * tm.pow(svf, 1.0/3.0) / (1.0 - svf)**4)
+            A_eps = (5.81 * (1 - fvf) / fvf**3
+                     + 0.48 * tm.pow(1 - fvf, 1.0/3.0) / fvf**4)
 
             # Dynamic correction term B(Re_p, ε_p)
-            svf3 = svf ** 3
-            B_eps = svf3 * Re_p * (0.95 + 0.61 * svf3 / (1.0 - svf)**2)
 
-            Cd = (1.0 - svf) * (Cd0 / (1.0 - svf)**3 + A_eps + B_eps)
+            B_eps = (1 - fvf)**3 * Re_p * (0.95 + 0.61 * (1 - fvf)**3 / fvf**2)
+
+            Cd = fvf * (Cd0 / fvf**3 + A_eps + B_eps)
         return Cd
 
     # ======================================================================
@@ -624,17 +670,22 @@ class HybridLattice3D(BasicLattice3D):
         yc = (self.dem.gf[gid].position[1] - self.dem.config.domain.ymin + 0.5 * self.unit.dx) / self.unit.dx
         zc = (self.dem.gf[gid].position[2] - self.dem.config.domain.zmin + 0.5 * self.unit.dx) / self.unit.dx
 
-        # Search bounds (support radius ~2 for interpolation)
-        x0 = ti.max(0, int(xc - 2))
-        x1 = ti.min(self.Nx, int(xc + 2))
-        y0 = ti.max(0, int(yc - 2))
-        y1 = ti.min(self.Ny, int(yc + 2))
-        z0 = ti.max(0, int(zc - 2))
-        z1 = ti.min(self.Nz, int(zc + 2))
+        # Search bounds (support radius ~2.5 for interpolation)
+        x0 = ti.max(0, int(xc - 2.5))
+        x1 = ti.min(self.Nx, int(xc + 2.5))
+        y0 = ti.max(0, int(yc - 2.5))
+        y1 = ti.min(self.Ny, int(yc + 2.5))
+        z0 = ti.max(0, int(zc - 2.5))
+        z1 = ti.min(self.Nz, int(zc + 2.5))
 
         # IBM interpolation: accumulate weighted fluid velocity and ε
-        u_fluid_particle = Vector3(0.0, 0.0, 0.0)
+        vel_wsum = Vector3(0.0, 0.0, 0.0)
         volfrac_particle = 0.0
+        eps_sum = 0.0
+        w_total = 0.0
+        n_lattice = 0
+
+
 
         for i in range(x0, x1):
             for j in range(y0, y1):
@@ -642,40 +693,47 @@ class HybridLattice3D(BasicLattice3D):
                     if self.CT[i, j, k] & (CellType.OBSTACLE | CellType.VEL_LADD | CellType.FREE_SLIP):
                         continue
 
-                    dist_x = ti.abs(xc - i)
-                    dist_y = ti.abs(yc - j)
-                    dist_z = ti.abs(zc - k)
-
-                    w = (self._threedelta(dist_x) *
-                         self._threedelta(dist_y) *
-                         self._threedelta(dist_z))
+                    w_ij = self._kernel_with_mirror(xc, yc, zc, i, j, k)
+                    if w_ij < 0.0:
+                        continue
 
                     # self.vel is in lattice units
-                    u_fluid_particle += self.vel[i, j, k] * w
-                    volfrac_particle += self.fine_volfrac[i, j, k] * w
+                    vel_wsum += self.vel[i, j, k] * w_ij
+                    eps_sum += (1 - self.fine_volfrac[i,j,k] - self.coarse_volfrac[i,j,k])
+                    w_total += w_ij
+                    n_lattice += 1
 
-        if volfrac_particle > 0.0:
-            # Convert interpolated fluid velocity to physical units
-            u_fluid = u_fluid_particle * self.unit.dx / self.unit.dt
+        # Recover fluid quantities at particle location
+        fluid_vel = Vector3(0.0, 0.0, 0.0)
+        eps_fluid = 0.0
+
+        if  w_total > 1e-15:
+            fluid_vel = vel_wsum / w_total * self.unit.dx / self.unit.dt# Convert interpolated fluid velocity to physical units
+        if n_lattice > 0:
+            # Eq.(21): eps_fluid = sum(eps_{i,j}) / N_lattice
+            eps_fluid = eps_sum / float(n_lattice)
+
+        # Drag force
+        if 1.0 - eps_fluid > 1e-15:
             d_p = 2.0 * self.dem.gf[gid].radius
-            u_slip = self.dem.gf[gid].velocity - u_fluid
+            u_slip = self.dem.gf[gid].velocity - fluid_vel
 
-            self.dem.gf[gid].force_fluid += self._tenneti_drag(d_p, u_slip, volfrac_particle)
+            self.dem.gf[gid].force_fluid += self._tenneti_drag(d_p, u_slip, eps_fluid)
 
     @ti.func
-    def _tenneti_drag(self, dp: float, u_slip: Vector3, svf: float) -> Vector3:
+    def _tenneti_drag(self, dp: float, u_slip: Vector3, fvf: float) -> Vector3:
         """
         Calculate Tenneti drag force vector in physical units [N].
-        Formula: F_d = -3π d_p μ (1-ε) C_d(Re_p, ε) u_slip
+        Formula: F_d = -3π d_p μ ε_f C_d(Re_p, ε) u_slip
         """
         u_mag = tm.length(u_slip)
-        Re_p = (1.0 - svf) * self.rho0 * dp * u_mag / self.mu
+        Re_p = fvf * self.rho0 * dp * u_mag / self.mu
 
         # Compute Drag Coefficient Cd (Reuses shared logic)
-        Cd = self._compute_tenneti_Cd(Re_p, svf)
+        Cd = self._compute_tenneti_Cd(Re_p, fvf)
 
         # Drag Force Vector
-        F_drag = -3.0 * tm.pi * dp * self.mu * (1.0 - svf) * Cd * u_slip
+        F_drag = -3.0 * tm.pi * dp * self.mu * fvf * Cd * u_slip
         return F_drag
 
     # ======================================================================
@@ -697,6 +755,80 @@ class HybridLattice3D(BasicLattice3D):
             a = (5.0 - 3.0 * r - ti.sqrt(x)) / 6.0
         return a
 
+    # =====================================
+    # Mirror-Particle Kernel Helper
+    # =====================================
+
+    @ti.func
+    def _kernel_with_mirror(self, xc: float, yc: float, zc: float,
+                            ii: int, jj: int, kk: int) -> float:
+        """
+        Evaluate mirror-extended kernel W_bar = W(x_p) + W(x'_p) at lattice node (ii,jj,kk).
+
+        Implements boundary treatment Eq.(22) of Zhu et al. (2026):
+          W_bar = W(x_p) + W(x'_p)
+        where x'_p is the mirror image of x_p reflected about the nearest domain wall.
+
+        This folds the truncated kernel lobe back into the domain, preventing
+        underestimation of solid volume fraction at boundary nodes (cf. Fig.4 in paper).
+        The threedelta kernel has support radius 1.5 lu, so mirror correction is
+        triggered when the particle centre is within 1.5 lu of any wall.
+
+        Args:
+            xc, yc, zc (float): Particle centre in lattice coordinates.
+            ii, jj, kk (int):   Target lattice node indices.
+
+        Returns:
+            float: Mirror-corrected kernel weight W_bar.
+        """
+        support = 1.5  # threedelta support radius in lattice units
+
+        # Primary distances
+        # W(x_p) -- primary contribution
+        w_primary = (self._threedelta(ti.abs(xc - ii)) *
+                     self._threedelta(ti.abs(yc - jj)) *
+                     self._threedelta(ti.abs(zc - kk)))
+
+        # W(x'_p) -- mirror contributions (Eq.22)
+        w_mirror = 0.0
+
+        # -- x walls --
+        if xc < support:  # near left wall (i = 0)
+            xc_mir = -xc
+            w_mirror += (self._threedelta(ti.abs(xc_mir - ii)) *
+                         self._threedelta(ti.abs(yc - jj)) *
+                         self._threedelta(ti.abs(zc - kk)))
+        if xc > float(self.Nx - 1) - support:  # near right wall (i = Nx -1)
+            xc_mir = 2.0 * float(self.Nx - 1) - xc
+            w_mirror += (self._threedelta(ti.abs(xc_mir - ii)) *
+                         self._threedelta(ti.abs(yc - jj)) *
+                         self._threedelta(ti.abs(zc - kk)))
+
+        # -- y walls --
+        if yc < support:
+            yc_mir = -yc
+            w_mirror += (self._threedelta(ti.abs(xc - ii)) *
+                         self._threedelta(ti.abs(yc_mir - jj)) *
+                         self._threedelta(ti.abs(zc - kk)))
+        if yc > float(self.Ny - 1) - support:
+            yc_mir = 2.0 * float(self.Ny - 1) - yc
+            w_mirror += (self._threedelta(ti.abs(xc - ii)) *
+                         self._threedelta(ti.abs(yc_mir - jj)) *
+                         self._threedelta(ti.abs(zc - kk)))
+
+        # -- z walls --
+        if zc < support:
+            zc_mir = -zc
+            w_mirror += (self._threedelta(ti.abs(xc - ii)) *
+                         self._threedelta(ti.abs(yc - jj)) *
+                         self._threedelta(ti.abs(zc_mir - kk)))
+        if zc > float(self.Nz - 1) - support:
+            zc_mir = 2.0 * float(self.Nz - 1) - zc
+            w_mirror += (self._threedelta(ti.abs(xc - ii)) *
+                         self._threedelta(ti.abs(yc - jj)) *
+                         self._threedelta(ti.abs(zc_mir - kk)))
+
+        return w_primary + w_mirror  # W_bar = W(x_p) + W(x'_p),
     # ======================================================================
     # High-level interface
     # ======================================================================
@@ -704,8 +836,8 @@ class HybridLattice3D(BasicLattice3D):
     def initialize_complete(self):
         """Complete initialization sequence for coupling."""
         self.initialize()
-        self.map_fine_grains()
         self.map_coarse_grains()
+        self.map_fine_grains()
         self.compute_fine_weights()
 
     def update_coupling(self):
