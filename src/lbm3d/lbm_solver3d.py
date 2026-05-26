@@ -235,13 +235,13 @@ class BasicLattice3D:
             if self.CT[i, j, k] & CellType.FLUID: self.compute_rho_vel(i, j, k)
 
             # apply boundary conditions (wet node approaches)
-            for i, j, k in ti.ndrange(self.Nx, self.Ny, self.Nz):
-                if self.CT[i, j, k] & CellType.VEL_ZOUHE:
-                    self.vel_zouHe(i, j, k)
-                elif self.CT[i, j, k] & CellType.VEL_EXIT:
-                    self.bc_vel_exit(i, j, k)
-                elif self.CT[i, j, k] & CellType.Pre_ZOUHE:
-                    self.pre_zouHe(i, j, k)
+        for i, j, k in ti.ndrange(self.Nx, self.Ny, self.Nz):
+            if self.CT[i, j, k] & CellType.VEL_ZOUHE:
+                self.vel_zouHe(i, j, k)
+            elif self.CT[i, j, k] & CellType.VEL_EXIT:
+                self.bc_vel_exit(i, j, k)
+            elif self.CT[i, j, k] & CellType.Pre_ZOUHE:
+                self.pre_zouHe(i, j, k)
 
     # =========================================#
     # ----- Calculate Local Equilibrium ----- #
