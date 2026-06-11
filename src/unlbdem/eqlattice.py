@@ -545,9 +545,8 @@ class EqIMBlattice3D(BasicLattice3D):
         # W(x_p) -- primary contribution
         w_primary = self.threedelta(dist)
 
-        # W(x'_p) -- mirror contributions (Eq.22)
+        # W(x'_p) -- mirror contributions
         w_mirror = 0.0
-        #
         # -- x walls --
         if xc < support:  # near left wall (i = 0)
             xc_mir = -xc
@@ -582,7 +581,7 @@ class EqIMBlattice3D(BasicLattice3D):
                          self.threedelta(ti.abs(yc - jj)) *
                          self.threedelta(ti.abs(zc_mir - kk)))
 
-        return w_primary + w_mirror  # W_bar = W(x_p) + W(x'_p),
+        return w_primary + w_mirror  # W_bar = W(x_p) + W(x'_p)
     # =====================================
     # High-Level Interface
     # =====================================

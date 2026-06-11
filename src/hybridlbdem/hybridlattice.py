@@ -708,9 +708,9 @@ class HybridLattice3D(BasicLattice3D):
         eps_fluid = 0.0
 
         if  w_total > 1e-15:
-            fluid_vel = vel_wsum / w_total * self.unit.dx / self.unit.dt# Convert interpolated fluid velocity to physical units
+            fluid_vel = vel_wsum / w_total * self.unit.dx / self.unit.dt #Convert interpolated fluid velocity to physical units
         if n_lattice > 0:
-            # Eq.(21): eps_fluid = sum(eps_{i,j}) / N_lattice
+            # eps_fluid = sum(eps_{i,j}) / N_lattice
             eps_fluid = eps_sum / float(n_lattice)
 
         # Drag force

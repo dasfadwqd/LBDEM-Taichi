@@ -183,9 +183,9 @@ class BasicLattice3D:
             if self.CT[i, j, k] & (CellType.OBSTACLE | CellType.VEL_LADD | CellType.FREE_SLIP):
                 continue
 
-            self.computeOmega(i, j, k)
             # update the equilibrium state
             self.compute_feq(i, j, k)
+            #self.computeOmega(i, j, k)
 
             # collision (relax the distribution functions towards equilibrium)
             for q in ti.static(range(BasicLattice3D.Q)):
