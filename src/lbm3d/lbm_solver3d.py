@@ -180,13 +180,12 @@ class BasicLattice3D:
         """
         for i, j, k in ti.ndrange(self.Nx, self.Ny, self.Nz):
             # skip the boundary nodes
-            if self.CT[i, j, k] & (CellType.OBSTACLE | CellType.VEL_LADD | CellType.FREE_SLIP):
+            if self.CT[i, j, k] & (CellType.OBSTACLE | CellType.VEL_LADD | CellType.FREE_SLIP | CellType.VEL_INLET_LADD):
                 continue
 
             # update the equilibrium state
+            self.computeOmega(i, j, k)
             self.compute_feq(i, j, k)
-            #self.computeOmega(i, j, k)
-
             # collision (relax the distribution functions towards equilibrium)
             for q in ti.static(range(BasicLattice3D.Q)):
                 self.fpc[i, j, k][q] = (1.0 - self.omega[i, j, k]) * self.f[i, j, k][q] + self.omega[i, j, k] * \
@@ -202,7 +201,7 @@ class BasicLattice3D:
             Update the fluid density and velocity after the boundary conditions have been applied.
         """
         for i, j, k in ti.ndrange(self.Nx, self.Ny, self.Nz):
-            if self.CT[i, j, k] & (CellType.OBSTACLE | CellType.VEL_LADD | CellType.FREE_SLIP):
+            if self.CT[i, j, k] & (CellType.OBSTACLE | CellType.VEL_LADD | CellType.FREE_SLIP|CellType.VEL_INLET_LADD):
                 continue
 
             # copy distribution function at rest
@@ -223,6 +222,11 @@ class BasicLattice3D:
                     cu = tm.dot(BasicLattice3D.c[q], self.vel[iNext, jNext, kNext])
                     self.f[i, j, k][q] = self.fpc[i, j, k][BasicLattice3D.qinv[q]] + 2.0 * BasicLattice3D.w[q] * \
                                          self.rho[i, j, k] * cu / BasicLattice3D.cssq
+                elif self.CT[iNext, jNext, kNext] & CellType.VEL_INLET_LADD:  # ★ 新增
+                    cu = tm.dot(BasicLattice3D.c[q], self.vel[iNext, jNext, kNext])
+                    self.f[i, j, k][q] = (self.fpc[i, j, k][BasicLattice3D.qinv[q]]
+                                          + 2.0 * BasicLattice3D.w[q]
+                                          * self.rho[i, j, k] * cu / BasicLattice3D.cssq)
                 elif self.CT[iNext, jNext, kNext] & CellType.FREE_SLIP:  # specular reflection
                     if self.CT[iNext, jNext, kNext] & (CellType.LEFT | CellType.RIGHT):
                         self.f[i, j, k][q] = self.fpc[i, jNext, kNext][BasicLattice3D.qsyx[q]]
@@ -242,6 +246,8 @@ class BasicLattice3D:
                 self.bc_vel_exit(i, j, k)
             elif self.CT[i, j, k] & CellType.Pre_ZOUHE:
                 self.pre_zouHe(i, j, k)
+            elif self.CT[i, j, k] & CellType.VEL_INLET_LADD:
+                self.bc_ladd_inlet(i, j, k)
 
     # =========================================#
     # ----- Calculate Local Equilibrium ----- #
@@ -471,7 +477,7 @@ class BasicLattice3D:
         PiNeq_xz = 0.0
         PiNeq_yz = 0.0
 
-        for q in range(BasicLattice3D.Q):
+        for q in ti.static(range(BasicLattice3D.Q)):
             fnoneq = self.f[i, j, k][q] - self.feq[i, j, k][q]
             cx = BasicLattice3D.c[q].x
             cy = BasicLattice3D.c[q].y
@@ -963,6 +969,20 @@ class BasicLattice3D:
             self.f[i, j, k][13] = self.f[i, j, k][14] + 1 / 6 * rho * -self.vel[i, j, k][2] - Nx_z
             self.f[i, j, k][16] = self.f[i, j, k][15] + 1 / 6 * rho * -self.vel[i, j, k][2] + Ny_z
             self.f[i, j, k][17] = self.f[i, j, k][18] + 1 / 6 * rho * -self.vel[i, j, k][2] - Ny_z
+
+    @ti.func
+    def bc_ladd_inlet(self, i: int, j: int, k: int):
+        """Ladd 半步长反弹速度入口：更新入口节点的密度。
+
+        vel[i,j,k] 由用户在每步前预设，此处仅用邻居密度一阶外推更新 rho。
+        反弹本身已在 stream() 的 for-q 循环中完成。
+        """
+        if   self.CT[i, j, k] & CellType.LEFT:   self.rho[i, j, k] = self.rho[i + 1, j, k]
+        elif self.CT[i, j, k] & CellType.RIGHT:  self.rho[i, j, k] = self.rho[i - 1, j, k]
+        elif self.CT[i, j, k] & CellType.BOTTOM: self.rho[i, j, k] = self.rho[i, j + 1, k]
+        elif self.CT[i, j, k] & CellType.TOP:    self.rho[i, j, k] = self.rho[i, j - 1, k]
+        elif self.CT[i, j, k] & CellType.BACK:   self.rho[i, j, k] = self.rho[i, j, k + 1]
+        elif self.CT[i, j, k] & CellType.FRONT:  self.rho[i, j, k] = self.rho[i, j, k - 1]
 '''
     # =============================#
     # ----- Partial-slip BC ----- #

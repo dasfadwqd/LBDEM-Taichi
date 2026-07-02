@@ -82,6 +82,7 @@ class CellType:
 
 
     Pre_ZOUHE = 0b_0000_0001_0000_0000  # 256: pressure boundary
+    VEL_INLET_LADD = 0b_0100_0000_0000_0000_0000  # 262144
     # boundary conditions 2
     NO_FLUID_NEIGH = 0b_0000_0010_0000_0000  # 512: no gas neighbour interface cells
     TO_FLUID = 0b_0000_0100_0000_0000  # 1024: to fluid interface cells
