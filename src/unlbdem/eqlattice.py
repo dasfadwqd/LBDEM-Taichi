@@ -498,14 +498,12 @@ class EqIMBlattice3D(BasicLattice3D):
         # -- x walls --
         if xc < support:  # near left wall (i = 0)
             xc_mir = -xc
-            w_mirror += (self.threedelta(ti.abs(xc_mir - ii)) *
-                         self.threedelta(ti.abs(yc - jj)) *
-                         self.threedelta(ti.abs(zc - kk)))
+            dist = ti.sqrt((xc_mir - ii) ** 2 + (yc - jj) ** 2 + (zc - kk) ** 2)
+            w_mirror += self.threedelta(dist)
         if xc > float(self.Nx -1) - support:  # near right wall (i = Nx -1)
             xc_mir = 2.0 * float(self.Nx -1) - xc
-            w_mirror += (self.threedelta(ti.abs(xc_mir - ii)) *
-                         self.threedelta(ti.abs(yc - jj)) *
-                         self.threedelta(ti.abs(zc - kk)))
+            dist = ti.sqrt((xc_mir - ii) ** 2 + (yc - jj) ** 2 + (zc - kk) ** 2)
+            w_mirror += self.threedelta(dist)
 
         # -- y walls --
         if yc < support:
@@ -520,14 +518,12 @@ class EqIMBlattice3D(BasicLattice3D):
         # -- z walls --
         if zc < support:
             zc_mir = -zc
-            w_mirror += (self.threedelta(ti.abs(xc - ii)) *
-                         self.threedelta(ti.abs(yc - jj)) *
-                         self.threedelta(ti.abs(zc_mir - kk)))
+            dist = ti.sqrt((xc - ii) ** 2 + (yc - jj) ** 2 + (zc_mir - kk) ** 2)
+            w_mirror += self.threedelta(dist)
         if zc > float(self.Nz-1) - support:
             zc_mir = 2.0 * float(self.Nz-1) - zc
-            w_mirror += (self.threedelta(ti.abs(xc - ii)) *
-                         self.threedelta(ti.abs(yc - jj)) *
-                         self.threedelta(ti.abs(zc_mir - kk)))
+            dist = ti.sqrt((xc - ii) ** 2 + (yc - jj) ** 2 + (zc_mir - kk) ** 2)
+            w_mirror += self.threedelta(dist)
 
         return w_primary + w_mirror  # W_bar = W(x_p) + W(x'_p)
     # =====================================
