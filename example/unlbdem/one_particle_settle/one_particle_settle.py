@@ -95,15 +95,13 @@ dens = 1120  # particle density [kg/m3]
 # flow velocity at the entrance and flow regime
 Re = params['Re'] # Reynolds number
 umax = params['umax']
-
-
 # DEM simulation parameters
 particle_init = 'one_particle.p4p'
 
 
 grav = Vector3(0.0, -9.81*(dens-rho)/dens , 0.0)                          # reduced gravity due to buoyancy [m/s^2]
 # LBM relaxation time and time step
-tau = 0.50031  # relaxation time
+tau = 0.5003  # relaxation time
 omega = 1.0 / tau  # relaxation frequency
 nuLU = (tau - 0.5) / 3.0  # fluid viscosity in lattice units
 dtLBM = (dx ** 2) / (nu / nuLU)  # time step [s]
@@ -113,7 +111,7 @@ dtLBM = (dx ** 2) / (nu / nuLU)  # time step [s]
 step = 0  # number of cycles
 total_time = 5.0
 totalSteps = round(total_time / dtLBM)  # total number of time step
-logSteps = round(0.1 / dtLBM)  # print log info every 'logSteps' steps
+logSteps = round(0.01 / dtLBM)  # print log info every 'logSteps' steps
 subCycles = 100  # number of sub-cycles (no influence if no collision!)
 dtDEM = dtLBM / subCycles  # DEM time step [s]
 
@@ -166,7 +164,7 @@ config.set_wall_properties(
     elastic_modulus=1e8,
     poisson_ratio=0.3
 )
-
+#config.set_periodic_boundaries(x_periodic=True,z_periodic=True)
 # Initialize solver
 domain_min = Vector3(xmin , ymin ,zmin)
 domain_max = Vector3(xmax , ymax ,zmax)

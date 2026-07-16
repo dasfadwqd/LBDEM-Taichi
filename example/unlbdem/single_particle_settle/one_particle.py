@@ -74,7 +74,7 @@ lx = 0.1  # dimension in x-direction [m]
 ly = 0.16  # dimension in y-direction [m]
 lz = 0.1  # dimension in z-direction [m]
 dia = 0.015
-dx = 0.020  # lattice spacing [m]
+dx = 0.025  # lattice spacing [m]
 # Compute grid size to cover [0, L] with margin
 Nx =  int(lx / dx )+1  # number of lattice nodes in x-direction
 Ny =  int(ly / dx )+1  # number of lattice nodes in y-direction
@@ -82,7 +82,7 @@ Nz =  int(lz / dx) +1  # number of lattice nodes in y-direction
 x = np.arange(Nx) * dx - 0.5 * dx  # x-coordinates [m]
 y = np.arange(Ny) * dx - 0.5 * dx  # y-coordinates [m]
 z = np.arange(Nz) * dx - 0.5 * dx  # z-coordinates [m]
-case_id = 'case4'
+case_id = 'case2'
 
 params = CASES[case_id]
 # fluid properties
@@ -103,7 +103,7 @@ particle_init = 'one_particle.p4p'
 
 grav = Vector3(0.0, -9.81*(dens-rho)/dens , 0.0)                          # reduced gravity due to buoyancy [m/s^2]
 # LBM relaxation time and time step
-tau = 0.501  # relaxation time
+tau = 0.5001  # relaxation time
 omega = 1.0 / tau  # relaxation frequency
 nuLU = (tau - 0.5) / 3.0  # fluid viscosity in lattice units
 dtLBM = (dx ** 2) / (nu / nuLU)  # time step [s]
@@ -113,7 +113,7 @@ dtLBM = (dx ** 2) / (nu / nuLU)  # time step [s]
 step = 0  # number of cycles
 total_time = 5.0
 totalSteps = round(total_time / dtLBM)  # total number of time step
-logSteps = round(0.05 / dtLBM)  # print log info every 'logSteps' steps
+logSteps = round(0.01 / dtLBM)  # print log info every 'logSteps' steps
 subCycles = 10  # number of sub-cycles (no influence if no collision!)
 dtDEM = dtLBM / subCycles  # DEM time step [s]
 

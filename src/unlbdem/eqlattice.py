@@ -91,7 +91,7 @@ class EqIMBlattice3D(BasicLattice3D):
     def initialize(self):
         """Initialize lattice to equilibrium state, skipping boundary cells."""
         for i, j, k in ti.ndrange(self.Nx, self.Ny, self.Nz):
-            if self.CT[i, j, k] & (CellType.OBSTACLE | CellType.VEL_LADD | CellType.FREE_SLIP):
+            if self.CT[i, j, k] & (CellType.OBSTACLE | CellType.VEL_LADD | CellType.FREE_SLIP| CellType.VEL_INLET_LADD):
                 continue
             self.compute_feq(i, j, k)
             for q in ti.static(range(self.Q)):
@@ -153,7 +153,8 @@ class EqIMBlattice3D(BasicLattice3D):
                     for kk in range(k_min, k_max):
                         if self.CT[ii, jj, kk] & (CellType.OBSTACLE
                                                   | CellType.VEL_LADD
-                                                  | CellType.FREE_SLIP):
+                                                  | CellType.FREE_SLIP
+                        | CellType.VEL_INLET_LADD):
                             continue
                         w_bar = self._kernel_with_mirror(xc, yc, zc, ii, jj, kk)
                         if w_bar < 0.0:
@@ -169,7 +170,8 @@ class EqIMBlattice3D(BasicLattice3D):
                     for kk in range(k_min, k_max):
                         if self.CT[ii, jj, kk] & (CellType.OBSTACLE
                                                   | CellType.VEL_LADD
-                                                  | CellType.FREE_SLIP):
+                                                  | CellType.FREE_SLIP
+                        | CellType.VEL_INLET_LADD):
                             continue
                         w_bar = self._kernel_with_mirror(xc, yc, zc, ii, jj, kk)
                         if w_bar < 0.0:
@@ -242,10 +244,10 @@ class EqIMBlattice3D(BasicLattice3D):
     def collide(self):
         """Perform collision with solid-fluid coupling based on local weight."""
         for i, j, k in ti.ndrange(self.Nx, self.Ny, self.Nz):
-            if self.CT[i, j, k] & (CellType.OBSTACLE | CellType.VEL_LADD | CellType.FREE_SLIP):
+            if self.CT[i, j, k] & (CellType.OBSTACLE | CellType.VEL_LADD | CellType.FREE_SLIP | CellType.VEL_INLET_LADD):
                 continue
+            self.computeOmega(i , j, k)
             self.compute_feq(i, j, k)
-            self.computeomega(i, j, k)
             if self.volfrac[i, j, k] > 0.0:
                 self.collide_solid(i, j, k)
             else:
@@ -348,7 +350,8 @@ class EqIMBlattice3D(BasicLattice3D):
                     for kk in range(z_begin, z_end):
                         if self.CT[ii, jj, kk] & (CellType.OBSTACLE
                                                   | CellType.VEL_LADD
-                                                  | CellType.FREE_SLIP):
+                                                  | CellType.FREE_SLIP
+                        | CellType.VEL_INLET_LADD):
                             continue
                         w_ij = self._kernel_with_mirror(xc, yc, zc, ii, jj, kk)
                         if w_ij < 0.0:
@@ -440,62 +443,7 @@ class EqIMBlattice3D(BasicLattice3D):
 
         return F_drag
 
-    # ===========================================#
-    # ----- Compute Strain Rate Magnitude ----- #
-    # ===========================================#
-    @ti.func
-    def compute_strain_rate(self, i: int, j: int, k: int):
-        """Calculates the local strain-rate according to the momentum flux tensor.
 
-        Args:
-            i (int): Index of x-coordinate.
-            j (int): Index of y-coordinate.
-            k (int): Index of z-coordinate.
-        """
-        # Calculate non-equilibrium momentum flux tensor components
-        # Diagonal elements
-        PiNeq_xx = 0.0
-        PiNeq_yy = 0.0
-        PiNeq_zz = 0.0
-
-        # Off-diagonal elements
-        PiNeq_xy = 0.0
-        PiNeq_xz = 0.0
-        PiNeq_yz = 0.0
-
-        for q in ti.static(range(self.Q)):
-            fnoneq = self.f[i, j, k][q] - self.feq[i, j, k][q]
-            cx = BasicLattice3D.c[q].x
-            cy = BasicLattice3D.c[q].y
-            cz = BasicLattice3D.c[q].z
-
-            PiNeq_xx += fnoneq * cx * cx
-            PiNeq_yy += fnoneq * cy * cy
-            PiNeq_zz += fnoneq * cz * cz
-            PiNeq_xy += fnoneq * cx * cy
-            PiNeq_xz += fnoneq * cx * cz
-            PiNeq_yz += fnoneq * cy * cz
-
-        # calculate the magnitude of momentum flux tensor
-        Pi = (2.0 * (PiNeq_xx ** 2 + PiNeq_yy ** 2 + PiNeq_zz ** 2 + 2.0 * (
-                PiNeq_xy ** 2 + PiNeq_xz ** 2 + PiNeq_yz ** 2))) ** 0.5
-
-        # assign the local strain-rate
-        self.rate[i, j, k] = self.omega[i, j, k] / (2.0 * BasicLattice3D.cssq * self.rho[i, j, k]) * Pi
-
-    @ti.func
-    def computeomega(self, i: int, j: int, k: int):
-        """Compute local relaxation frequency based on effective viscosity
-        """
-
-        # Compute strain rate magnitude using lattice-specific method
-        self.compute_strain_rate(i, j, k)
-        # Compute turbulent viscosity: nu_t = (Cs * Delta)^2 * |S|
-        nuTurb = (self.SmagorinskyConstant * 1.0) ** 2 * self.rate[i, j, k]
-
-        # Effective relaxation time: tau_eff = tau0 + nu_turb / cs^2
-        tauEff = 1.0 / self.omega0 + nuTurb / BasicLattice3D.cssq
-        self.omega[i, j, k] = 1 / tauEff
 
     # =====================================
     # Interpolation Kernel Function
