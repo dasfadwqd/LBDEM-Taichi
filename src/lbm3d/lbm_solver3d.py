@@ -638,57 +638,30 @@ class BasicLattice3D:
             self.f[i, j, k][16] = self.f[i, j, k][15] + (self.feq[i, j, k][16] - self.feq[i, j, k][15])
             self.f[i, j, k][17] = self.f[i, j, k][18] + (self.feq[i, j, k][17] - self.feq[i, j, k][18])
 
-    # =====================#
-    # ----- Exit BC ----- #
-    # =====================#
+    # =========================================#
+    # ----- Pressure Exit BC (convective) ----- #
+    # =========================================#
     @ti.func
     def bc_vel_exit(self, i: int, j: int, k: int):
-        """Exit boundary condition with zero velocity gradient.
-
-        Args:
-            i (int): Index of x-coordinate.
-            j (int): Index of y-coordinate.
-            k (int): Index of z-coordinate.
-        """
+        """Convective pressure outlet: extrapolated velocity + fixed density
+        + equilibrium reconstruction."""
         if self.CT[i, j, k] & CellType.LEFT:
-            self.f[i, j, k][1] = self.f[i + 1, j, k][1]
-            self.f[i, j, k][7] = self.f[i + 1, j, k][7]
-            self.f[i, j, k][9] = self.f[i + 1, j, k][9]
-            self.f[i, j, k][11] = self.f[i + 1, j, k][11]
-            self.f[i, j, k][13] = self.f[i + 1, j, k][13]
+            self.vel[i, j, k] = self.vel[i + 1, j, k]
         elif self.CT[i, j, k] & CellType.RIGHT:
-            self.f[i, j, k][2] = self.f[i - 1, j, k][2]
-            self.f[i, j, k][8] = self.f[i - 1, j, k][8]
-            self.f[i, j, k][10] = self.f[i - 1, j, k][10]
-            self.f[i, j, k][12] = self.f[i - 1, j, k][12]
-            self.f[i, j, k][14] = self.f[i - 1, j, k][14]
+            self.vel[i, j, k] = self.vel[i - 1, j, k]
         elif self.CT[i, j, k] & CellType.BOTTOM:
-            self.f[i, j, k][3] = self.f[i, j + 1, k][3]
-            self.f[i, j, k][7] = self.f[i, j + 1, k][7]
-            self.f[i, j, k][10] = self.f[i, j + 1, k][10]
-            self.f[i, j, k][15] = self.f[i, j + 1, k][15]
-            self.f[i, j, k][17] = self.f[i, j + 1, k][17]
+            self.vel[i, j, k] = self.vel[i, j + 1, k]
         elif self.CT[i, j, k] & CellType.TOP:
-            self.f[i, j, k][4] = self.f[i, j - 1, k][4]
-            self.f[i, j, k][8] = self.f[i, j - 1, k][8]
-            self.f[i, j, k][9] = self.f[i, j - 1, k][9]
-            self.f[i, j, k][16] = self.f[i, j - 1, k][16]
-            self.f[i, j, k][18] = self.f[i, j - 1, k][18]
+            self.vel[i, j, k] = self.vel[i, j - 1, k]
         elif self.CT[i, j, k] & CellType.BACK:
-            self.f[i, j, k][5] = self.f[i, j, k + 1][5]
-            self.f[i, j, k][11] = self.f[i, j, k + 1][11]
-            self.f[i, j, k][14] = self.f[i, j, k + 1][14]
-            self.f[i, j, k][15] = self.f[i, j, k + 1][15]
-            self.f[i, j, k][18] = self.f[i, j, k + 1][18]
+            self.vel[i, j, k] = self.vel[i, j, k + 1]
         elif self.CT[i, j, k] & CellType.FRONT:
-            self.f[i, j, k][6] = self.f[i, j, k - 1][6]
-            self.f[i, j, k][12] = self.f[i, j, k - 1][12]
-            self.f[i, j, k][13] = self.f[i, j, k - 1][13]
-            self.f[i, j, k][16] = self.f[i, j, k - 1][16]
-            self.f[i, j, k][17] = self.f[i, j, k - 1][17]
+            self.vel[i, j, k] = self.vel[i, j, k - 1]
 
-        # update velocity and density
-        self.compute_rho_vel(i, j, k)
+        self.rho[i, j, k] = 1.0
+        self.compute_feq(i, j, k)
+        for q in ti.static(range(BasicLattice3D.Q)):
+            self.f[i, j, k][q] = self.feq[i, j, k][q]
 
     # ===========================================#
     # ----- Zou & He Velocity and Pressure ----- #
