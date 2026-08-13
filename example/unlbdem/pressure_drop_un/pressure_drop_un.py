@@ -14,6 +14,7 @@ import sys
 import time
 import pickle
 import math
+import json
 import numpy as np
 
 # ============================================================
@@ -76,11 +77,14 @@ VALID_VF = [0.06, 0.10, 0.19, 0.28, 0.35]
 if len(sys.argv) >= 2:
     target_vf = float(sys.argv[1])
 else:
-    target_vf = 0.28
+    target_vf = 0.35
 
 target_vf = round(target_vf, 2)
 if target_vf not in VALID_VF:
     raise ValueError(f"体积分数 {target_vf} 不在支持列表 {VALID_VF} 中")
+
+# dx / Dp 比例（argv[2]，默认 1.0）。示例: python pressure_drop_un.py 0.28 0.9
+dx_ratio = 1.0
 
 # ============================================================
 # 路径配置
@@ -123,15 +127,17 @@ Lx = 30 * Dp        # 0.060 m
 Ly = 10 * Dp        # 0.020 m
 Lz = 10 * Dp        # 0.020 m
 
-# 压降采样截面（x=0.1L 和 x=0.9L，间距 0.8L）修改后
+# 压降采样截面（x=0.1L 和 x=0.9L，间距名义 0.8L）
+# 注意: 实际站点会吸附到最近网格节点，压降梯度的分母用吸附后站距 actual_DL，
+#       不能直接用名义 DL（dx 不能整除 0.8L 时会引入偏差）。
 x_lo = 0.1 * Lx     # 0.006 m
 x_hi = 0.9 * Lx     # 0.054 m
-DL = x_hi - x_lo    # 0.048 m（= 0.8L）
+DL = x_hi - x_lo    # 0.048 m（= 0.8L，仅作名义参考）
 
 # ============================================================
 # 网格
 # ============================================================
-dx = Dp *1.0
+dx = Dp * dx_ratio
 Nx = int(Lx / dx) + 2
 Ny = int(Ly / dx) + 2
 Nz = int(Lz / dx) + 2
@@ -139,6 +145,18 @@ Nz = int(Lz / dx) + 2
 x = np.arange(Nx) * dx - 0.5 * dx
 y = np.arange(Ny) * dx - 0.5 * dx
 z = np.arange(Nz) * dx - 0.5 * dx
+
+# 网格元数据：供后处理画图读取，避免画图脚本硬编码几何/网格
+# 实际物理流体域: 剔除 x/z 两侧各 1 个 ghost 后的长度 = (N-2)*dx
+grid_meta = {
+    'dx': dx,
+    'nx': Nx, 'ny': Ny, 'nz': Nz,
+    'dp': Dp,
+    'vf': target_vf,
+    'domain_m': [0.0, (Nx - 2) * dx, 0.0, (Ny - 2) * dx, 0.0, (Nz - 2) * dx],
+}
+with open(os.path.join(RESULT_DIR, 'grid_meta.json'), 'w', encoding='utf-8') as _fj:
+    json.dump(grid_meta, _fj, indent=2)
 
 # ============================================================
 # 流体参数
@@ -148,23 +166,23 @@ nu = 18e-6            # 运动粘度 [m²/s]
 Re = 0.8              # 文献规定
 U_in = Re * nu / Dp   # 入口速度 [m/s]
 
-tau = 0.521
+# 固定时间步长（文献 Vlogman et al. 2025 参考值），松弛参数由此导出
+dtLBM = 2.e-4 * Lx / U_in
+nuLU = nu * dtLBM / dx ** 2
+tau = 3.0 * nuLU + 0.5
 omega = 1.0 / tau
-nuLU = (tau - 0.5) / 3.0
-dtLBM = dx ** 2 * nuLU / nu
 
 U_LU = U_in * dtLBM / dx
 Ma = U_LU * math.sqrt(3)
 assert Ma < 0.1, f"Ma={Ma:.4f} 过大，请调整参数"
-
-Dt_ref = 2.03e-4 * Lx / U_in
+assert 0.5 < tau < 2.0, f"tau={tau:.4f} 超出稳定范围 (0.5, 2.0)，请调整 dx_ratio"
 
 # ============================================================
 # 时间控制
 # ============================================================
 total_time = 500.0
 totalSteps = round(total_time / dtLBM)
-logSteps = max(1, round(0.2 / dtLBM))
+logSteps = max(1, round(0.5 / dtLBM))
 subCycles = 1
 dtDEM = dtLBM / subCycles
 
@@ -176,10 +194,9 @@ STEADY_TOL = 0.05
 # ============================================================
 print('=' * 62)
 print(f'  多孔介质压降模拟（非解析）| ε_p = {target_vf:.2f}')
-print(f'  网格       : {Nx}×{Ny}×{Nz}，dx = {dx*1e3:.3f} mm')
+print(f'  网格       : {Nx}×{Ny}×{Nz}，dx = {dx*1e3:.3f} mm（= Dp × {dx_ratio}）')
 print(f'  Re         : {Re}，U_in = {U_in:.4f} m/s，ν = {nu:.1e} m²/s')
-print(f'  tau        : {tau}，omega = {omega:.4f}，nuLU = {nuLU:.4f}')
-print(f'  dtLBM      : {dtLBM:.4e} s  （文献参考 Dt = {Dt_ref:.4e} s）')
+print(f'  dtLBM      : {dtLBM:.4e} s（固定）→ tau = {tau:.4f}，omega = {omega:.4f}，nuLU = {nuLU:.4f}')
 print(f'  Ma         : {Ma:.5f}')
 print(f'  logSteps   : {logSteps}（每 {logSteps*dtLBM:.3f} s 记录）')
 print(f'  稳态判据   : 近 {N_WINDOW} 点振荡 < {STEADY_TOL*100:.0f}% 均值')
@@ -255,15 +272,22 @@ print(f'  [验证] 入口速度: {lattice.vel[0, Ny//2, Nz//2][0]:.6e} LU '
 # ============================================================
 # 压降计算
 # ============================================================
+# 采样站点吸附到最近网格节点。节点间实际距离 (i_hi-i_lo)*dx 才是压力
+# 实际降落的长度；名义 0.8L 仅在 dx 恰好整除时才精确，不能作为分母。
 i_lo = int(np.argmin(np.abs(x - x_lo)))
 i_hi = int(np.argmin(np.abs(x - x_hi)))
+x_lo_snap = x[i_lo]
+x_hi_snap = x[i_hi]
+actual_DL = x_hi_snap - x_lo_snap   # = (i_hi - i_lo) * dx
 
 # 物理声速
 cs_phys = dx / (math.sqrt(3) * dtLBM)
 
-print(f'  [压降换算] cs_phys={cs_phys:.3f} m/s, '
-      f'i_lo={i_lo}(x={x[i_lo]*1e3:.1f}mm), '
-      f'i_hi={i_hi}(x={x[i_hi]*1e3:.1f}mm)', flush=True)
+print(f'  [压降换算] cs_phys={cs_phys:.3f} m/s')
+print(f'  [压降换算] i_lo={i_lo} x={x_lo_snap*1e3:.3f}mm (目标 {x_lo*1e3:.1f}mm), '
+      f'i_hi={i_hi} x={x_hi_snap*1e3:.3f}mm (目标 {x_hi*1e3:.1f}mm)')
+print(f'  [压降换算] 实际站距 = {actual_DL*1e3:.3f} mm（名义 0.8L = {DL*1e3:.1f} mm，'
+      f'偏差 {(actual_DL-DL)/DL*100:+.2f}%）', flush=True)
 
 
 def calc_pressure_drop(rho_np: np.ndarray, debug: bool = False):
@@ -278,7 +302,7 @@ def calc_pressure_drop(rho_np: np.ndarray, debug: bool = False):
     dp_lu = drho_lu / 3.0
 
     dp_phys = lattice.unit.getPhysSigma(dp_lu)
-    dpdl_phys = dp_phys / DL
+    dpdl_phys = dp_phys / actual_DL
 
     # 粘性标度无量纲化
     eta0 = rho_f * nu  # 动力粘度 [Pa·s]
@@ -317,6 +341,7 @@ outDir = RESULT_DIR + '/'
 
 results = {
     't': 0,
+    'meta': grid_meta,
     'velf': lattice.unit.getPhysVel(lattice.vel.to_numpy()),
     'rhof': lattice.unit.getPhysRho(rho0),
     'pf': lattice.unit.getPhysSigma((rho0 - 1.0) / 3.0),
@@ -390,6 +415,7 @@ while step < totalSteps and not steady:
     # 保存流场数据
     results = {
         't': t_phys,
+        'meta': grid_meta,
         'velf': lattice.unit.getPhysVel(vel_np),
         'rhof': lattice.unit.getPhysRho(rho_np),
         'pf': lattice.unit.getPhysSigma((rho_np - 1.0) / 3.0),
