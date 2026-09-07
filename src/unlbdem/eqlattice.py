@@ -58,6 +58,12 @@ class EqIMBlattice3D(BasicLattice3D):
 
     # Static inverse direction mapping for D3Q19 lattice
     QINV_STATIC = (0, 2, 1, 4, 3, 6, 5, 8, 7, 10, 9, 12, 11, 14, 13, 16, 15, 18, 17)
+    DRAG_TENNETI = 0
+    DRAG_WEN_YU = 1
+    DRAG_GIDASPOW = 2
+    DRAG_EMMS = 3
+    DRAG_BEETSTRA = 4
+    ACTIVE_DRAG_MODEL = 0
 
     def __init__(self, Nx: int, Ny: int, Nz: int, omega: float,
                  dx: float, dt: float, rho: float, demslover: DEMSolver):
@@ -139,12 +145,20 @@ class EqIMBlattice3D(BasicLattice3D):
             vel_lu = self.dem.gf[pid].velocity * self.unit.dt / self.unit.dx
 
             # Support region (threedelta: +/- 1.5 lu)
+            # All directions clamped (walls). Mirror-particle treatment handles
+            # boundary correction via _kernel_with_mirror.
             i_min = ti.max(0, ti.cast(xc - support, ti.i32))
             i_max = ti.min(self.Nx, ti.cast(xc + support + 1, ti.i32))
             j_min = ti.max(0, ti.cast(yc - support, ti.i32))
             j_max = ti.min(self.Ny, ti.cast(yc + support + 1, ti.i32))
             k_min = ti.max(0, ti.cast(zc - support, ti.i32))
             k_max = ti.min(self.Nz, ti.cast(zc + support + 1, ti.i32))
+
+            # # ---- Original periodic Y/Z ----
+            # j_lo = ti.cast(yc - support, ti.i32)
+            # j_hi = ti.cast(yc + support + 1, ti.i32)
+            # k_lo = ti.cast(zc - support, ti.i32)
+            # k_hi = ti.cast(zc + support + 1, ti.i32)
 
             # ── Pass 1: denominator sum_j W_bar_{i,j} * V_j  (Eq.16) ──
             denom = 0.0
@@ -215,27 +229,98 @@ class EqIMBlattice3D(BasicLattice3D):
     @ti.func
     def weight_coefficient(self, dp: float, u_slip: Vector3, svf: float) -> float:
         """
-        Compute dimensionless weight coefficient using the Tenneti drag model.
+        Compute the dimensionless drag weight used in the collision operator.
 
-        Returns a lattice-scaled drag coefficient used in the collision operator.
+        The selected drag model provides Cd_star in:
+            F_drag = -3*pi*mu*dp*eps_f*Cd_star*u_slip
+        In lattice units this gives:
+            F_lattice = -Wd*u_slip_lattice
+            Wd = 3*pi*dp_lattice*nu_lattice*eps_f*Cd_star
         """
         u_slip_mag = tm.length(u_slip)
-        rho_f = self.rho0
-        mu0 = self.mu
-        Re_p = (1.0 - svf) * rho_f * dp * u_slip_mag / mu0
-
-        C_d = 0.0
-        if 1.0 - svf > 1e-9:
-            Cd0 = 1.0 + 0.15 * tm.pow(Re_p, 0.687)
-            A_eps = (5.81 * svf / ((1.0 - svf) ** 3) +
-                     0.48 * tm.pow(svf, 1.0 / 3.0) / ((1.0 - svf) ** 4))
-            svf3 = svf ** 3
-            B_eps = svf3 * Re_p * (0.95 + 0.61 * svf3 / ((1.0 - svf) ** 2))
-            C_d = (1.0 - svf) * (Cd0 / ((1.0 - svf) ** 3) + A_eps + B_eps)
-
+        Re_p = self._particle_reynolds(dp, u_slip_mag, svf)
+        fvf = 1.0 - svf
+        Cd_star = self._drag_coefficient_star(Re_p, svf)
         dp_lattice = dp / self.unit.dx
-        Wd = 3.0 * tm.pi * dp_lattice * self.nuLu * (1.0 - svf) * C_d
+        Wd = 3.0 * tm.pi * dp_lattice * self.nuLu * fvf * Cd_star
         return Wd
+
+    @ti.func
+    def _particle_reynolds(self, dp: float, u_slip_mag: float, svf: float) -> float:
+        return (1.0 - svf) * self.rho0 * dp * u_slip_mag / self.mu
+
+    @ti.func
+    def _drag_coefficient_star(self, Re_p: float, svf: float) -> float:
+        """
+        Return Cd_star in F_drag = -3*pi*mu*dp*eps_f*Cd_star*u_slip.
+
+        This keeps physical drag and lattice weight exactly consistent.
+        Wen-Yu uses:
+            Cd = 24/Re_p*(1 + 0.15*Re_p^0.687)
+            |F| = 0.5*Cd*eps_f^-2.7*pi*R^2*rho_f*|u|^2
+        which gives Cd_star = (1 + 0.15*Re_p^0.687)*eps_f^-4.7
+        under the Re_p definition used here.
+        Gidaspow uses Wen-Yu for eps_f > 0.8 and Ergun otherwise.
+        EMMS uses its heterogeneity correction for eps_f > 0.74 and Ergun
+        otherwise; its high-voidage branch gives Cd_star = Re_p*omega/(24*eps_f).
+        Beetstra directly returns Cd_star using svf as the solid volume fraction.
+        """
+        Cd_star = 0.0
+        fvf = 1.0 - svf
+        if ti.static(EqIMBlattice3D.ACTIVE_DRAG_MODEL == EqIMBlattice3D.DRAG_WEN_YU):
+            if fvf > 1e-9:
+                Cd_star = (1.0 + 0.15 * tm.pow(Re_p, 0.687)) / tm.pow(fvf, 4.7)
+        elif ti.static(EqIMBlattice3D.ACTIVE_DRAG_MODEL == EqIMBlattice3D.DRAG_GIDASPOW):
+            if fvf > 1e-9:
+                if fvf > 0.8:
+                    Cd_star = (1.0 + 0.15 * tm.pow(Re_p, 0.687)) / tm.pow(fvf, 3.65)
+                else:
+                    Cd_star = self._ergun_coefficient_star(Re_p, svf)
+        elif ti.static(EqIMBlattice3D.ACTIVE_DRAG_MODEL == EqIMBlattice3D.DRAG_EMMS):
+            if fvf > 1e-9:
+                if fvf > 0.74:
+                    emms_factor = 0.0
+                    if fvf <= 0.82:
+                        emms_factor = 0.0214 / (4.0 * (fvf - 0.7463) ** 2 + 0.0044) - 0.5760
+                    elif fvf <= 0.97:
+                        emms_factor = 0.0038 / (4.0 * (fvf - 0.7789) ** 2 + 0.0040) - 0.0101
+                    else:
+                        emms_factor = 32.8295 * fvf - 31.8295
+                    Cd_star = Re_p * emms_factor / (24.0 * fvf)
+                else:
+                    Cd_star = self._ergun_coefficient_star(Re_p, svf)
+        elif ti.static(EqIMBlattice3D.ACTIVE_DRAG_MODEL == EqIMBlattice3D.DRAG_BEETSTRA):
+            if fvf > 1e-9:
+                Re_eff = ti.max(Re_p, 1e-12)
+                static_term = 10.0 * svf / (fvf ** 2) + fvf ** 2 * (1.0 + 1.5 * ti.sqrt(svf))
+                dynamic_num = (1.0 / fvf
+                               + 3.0 * svf * fvf
+                               + 8.4 * tm.pow(Re_eff, -0.343))
+                dynamic_den = (1.0
+                               + tm.pow(10.0, 3.0 * svf)
+                               * tm.pow(Re_eff, -(1.0 + 4.0 * svf) / 2.0))
+                dynamic_term = (
+                    0.413 * Re_eff / (24.0 * fvf ** 2)
+                    * dynamic_num / dynamic_den
+                )
+                Cd_star = static_term + dynamic_term
+        else:
+            if fvf > 1e-9:
+                Cd0 = 1.0 + 0.15 * tm.pow(Re_p, 0.687)
+                A_eps = (5.81 * svf / (fvf ** 3)
+                         + 0.48 * tm.pow(svf, 1.0 / 3.0) / (fvf ** 4))
+                svf3 = svf ** 3
+                B_eps = svf3 * Re_p * (0.95 + 0.61 * svf3 / (fvf ** 2))
+                Cd_star = fvf * (Cd0 / (fvf ** 3) + A_eps + B_eps)
+        return Cd_star
+
+    @ti.func
+    def _ergun_coefficient_star(self, Re_p: float, svf: float) -> float:
+        fvf = 1.0 - svf
+        Cd_star = 0.0
+        if fvf > 1e-9:
+            Cd_star = (25.0 / 3.0) * svf / (fvf ** 2) + (1.75 / 18.0) * Re_p / (fvf ** 2)
+        return Cd_star
 
     # =====================================
     # Collision Step
@@ -246,7 +331,7 @@ class EqIMBlattice3D(BasicLattice3D):
         for i, j, k in ti.ndrange(self.Nx, self.Ny, self.Nz):
             if self.CT[i, j, k] & (CellType.OBSTACLE | CellType.VEL_LADD | CellType.FREE_SLIP | CellType.VEL_INLET_LADD):
                 continue
-            self.computeOmega(i , j, k)
+            #self.computeOmega(i , j, k)
             self.compute_feq(i, j, k)
             if self.volfrac[i, j, k] > 0.0:
                 self.collide_solid(i, j, k)
@@ -272,7 +357,7 @@ class EqIMBlattice3D(BasicLattice3D):
     @ti.func
     def collide_solid(self, i: int, j: int, k: int):
         """
-        Weighted collision operator for cells with solid presence.
+        Solid-fluid collision operator with mirror-bounce-back coupling.
 
         Combines fluid relaxation (Ω_f) and solid momentum exchange (Ω_s).
 
@@ -282,8 +367,13 @@ class EqIMBlattice3D(BasicLattice3D):
         # Update equilibrium using solid velocity
         self.compute_feq_solid(i, j, k)
         for q in range(EqIMBlattice3D.Q):
-            Omega_s = (self.f[i, j, k][EqIMBlattice3D.qinv[q]] - self.feq[i, j, k][EqIMBlattice3D.qinv[q]] +
-                       self.feqsolid[i, j, k][q] - self.f[i, j, k][q])
+
+            Omega_s = (
+                self.f[i, j, k][EqIMBlattice3D.qinv[q]]
+                - self.feq[i, j, k][EqIMBlattice3D.qinv[q]]
+                + self.feqsolid[i, j, k][q]
+                - self.f[i, j, k][q]
+            )
             Omega_f = -self.omega[i, j, k] * (self.f[i, j, k][q] - self.feq[i, j, k][q])
             self.fpc[i, j, k][q] = (
                 self.f[i, j, k][q]
@@ -331,12 +421,20 @@ class EqIMBlattice3D(BasicLattice3D):
             zc = (self.dem.gf[pid].position[2] - self.dem.config.domain.zmin
                   + 0.5 * self.unit.dx) / self.unit.dx
 
+            # Support region (threedelta: +/- 1.5 lu)
+            # All directions clamped (walls).
             x_begin = ti.max(0, ti.cast(xc - support, ti.i32))
             x_end = ti.min(self.Nx, ti.cast(xc + support + 1, ti.i32))
             y_begin = ti.max(0, ti.cast(yc - support, ti.i32))
             y_end = ti.min(self.Ny, ti.cast(yc + support + 1, ti.i32))
             z_begin = ti.max(0, ti.cast(zc - support, ti.i32))
             z_end = ti.min(self.Nz, ti.cast(zc + support + 1, ti.i32))
+
+            # # ---- Original periodic Y/Z ----
+            # y_lo = ti.cast(yc - support, ti.i32)
+            # y_hi = ti.cast(yc + support + 1, ti.i32)
+            # z_lo = ti.cast(zc - support, ti.i32)
+            # z_hi = ti.cast(zc + support + 1, ti.i32)
 
             # Accumulators
             vel_wsum = Vector3(0.0, 0.0, 0.0)  # sum w_{i,j}*u_j   — Eq.(19) numerator
@@ -392,7 +490,7 @@ class EqIMBlattice3D(BasicLattice3D):
     @ti.func
     def compute_drag_force(self, dp: float, u_slip: Vector3, svf: float) -> Vector3:
         """
-        Compute drag force on a particle using the Tenneti drag model for dense suspensions.
+        Compute drag force on a particle using the selected drag model.
 
         This model incorporates solid volume fraction (ε_p = svf) to account for
         particle-particle interactions in dense granular flows.
@@ -421,25 +519,11 @@ class EqIMBlattice3D(BasicLattice3D):
         Reference: Tenneti et al., Int. J. Multiphase Flow 37 (2011) 1072–1092.
         """
         u_slip_mag = tm.length(u_slip)
-        rho_f = self.rho0
-        mu0 = self.mu
-        Re_p = (1.0 - svf) * rho_f * dp * u_slip_mag / mu0
+        Re_p = self._particle_reynolds(dp, u_slip_mag, svf)
+        fvf = 1.0 - svf
+        Cd_star = self._drag_coefficient_star(Re_p, svf)
 
-        C_d = 0.0
-        if 1.0 - svf > 1e-9:
-            Cd0 = 1.0 + 0.15 * tm.pow(Re_p, 0.687)
-            # Static correction term A(ε_p)
-            A_eps = (5.81 * svf / ((1.0 - svf) ** 3) +
-                     0.48 * tm.pow(svf, 1.0 / 3.0) / ((1.0 - svf) ** 4))
-            # Dynamic correction term B(Re_p, ε_p)
-            svf3 = svf ** 3
-            B_eps = svf3 * Re_p * (0.95 + 0.61 * svf3 / ((1.0 - svf) ** 2))
-            # Assemble total drag coefficient
-            C_d = (1.0 - svf) * (Cd0 / ((1.0 - svf) ** 3) + A_eps + B_eps)
-        # =====================================
-        # Drag Force Vector
-        # =====================================
-        F_drag = - 3.0 * tm.pi * dp * mu0 * (1.0 - svf) * C_d * u_slip
+        F_drag = -3.0 * tm.pi * dp * self.mu * fvf * Cd_star * u_slip
 
         return F_drag
 
@@ -471,21 +555,18 @@ class EqIMBlattice3D(BasicLattice3D):
         """
         Evaluate mirror-extended kernel W_bar = W(x_p) + W(x'_p) at lattice node (ii,jj,kk).
 
-        Implements boundary treatment Eq.(22) of Zhu et al. (2026):
+        All walls (X, Y, Z) use the mirror-particle treatment (Eq.22 of Zhu et al. 2026):
           W_bar = W(x_p) + W(x'_p)
-        where x'_p is the mirror image of x_p reflected about the nearest domain wall.
-
+        where x'_p is the mirror image of x_p reflected about the nearest wall.
         This folds the truncated kernel lobe back into the domain, preventing
-        underestimation of solid volume fraction at boundary nodes (cf. Fig.4 in paper).
-        The threedelta kernel has support radius 1.5 lu, so mirror correction is
-        triggered when the particle centre is within 1.5 lu of any wall.
+        underestimation of solid volume fraction at boundary nodes.
 
         Args:
             xc, yc, zc (float): Particle centre in lattice coordinates.
-            ii, jj, kk (int):   Target lattice node indices.
+            ii, jj, kk (int):   Target lattice node (all clamped to [0, Ni)).
 
         Returns:
-            float: Mirror-corrected kernel weight W_bar.
+            float: Kernel weight W_bar (primary + mirror corrections).
         """
         support = 1.5  # threedelta support radius in lattice units
         dist = ti.sqrt((xc - ii) ** 2 + (yc - jj) ** 2 + (zc - kk) ** 2)
@@ -493,35 +574,35 @@ class EqIMBlattice3D(BasicLattice3D):
         # W(x_p) -- primary contribution
         w_primary = self.threedelta(dist)
 
-        # W(x'_p) -- mirror contributions
+        # W(x'_p) -- mirror contributions (all walls)
+        # Walls sit at HALF-cell planes: DEM domain maps to lattice
+        # coords [0.5, Ni-1.5], so mirror about 0.5 / Ni-1.5.
         w_mirror = 0.0
-        # -- x walls --
-        if xc < support:  # near left wall (i = 0)
-            xc_mir = -xc
+        # X walls
+        if xc < 0.5 + support:  # near left wall (xc = 0.5)
+            xc_mir = 1.0 - xc
             dist = ti.sqrt((xc_mir - ii) ** 2 + (yc - jj) ** 2 + (zc - kk) ** 2)
             w_mirror += self.threedelta(dist)
-        if xc > float(self.Nx -1) - support:  # near right wall (i = Nx -1)
-            xc_mir = 2.0 * float(self.Nx -1) - xc
+        if xc > float(self.Nx) - 1.5 - support:  # near right wall (xc = Nx-1.5)
+            xc_mir = 2.0 * (float(self.Nx) - 1.5) - xc
             dist = ti.sqrt((xc_mir - ii) ** 2 + (yc - jj) ** 2 + (zc - kk) ** 2)
             w_mirror += self.threedelta(dist)
-
-        # -- y walls --
-        if yc < support:
-            yc_mir = -yc
-            dist = ti.sqrt((xc - ii)**2 + (yc_mir - jj)**2 + (zc - kk)**2)
+        # Y walls
+        if yc < 0.5 + support:  # near bottom wall (yc = 0.5)
+            yc_mir = 1.0 - yc
+            dist = ti.sqrt((xc - ii) ** 2 + (yc_mir - jj) ** 2 + (zc - kk) ** 2)
             w_mirror += self.threedelta(dist)
-        if yc > float(self.Ny -1) - support:
-            yc_mir = 2.0 * float(self.Ny - 1) - yc
-            dist = ti.sqrt((xc - ii)**2 + (yc_mir - jj)**2 + (zc - kk)**2)
+        if yc > float(self.Ny) - 1.5 - support:  # near top wall (yc = Ny-1.5)
+            yc_mir = 2.0 * (float(self.Ny) - 1.5) - yc
+            dist = ti.sqrt((xc - ii) ** 2 + (yc_mir - jj) ** 2 + (zc - kk) ** 2)
             w_mirror += self.threedelta(dist)
-
-        # -- z walls --
-        if zc < support:
-            zc_mir = -zc
+        # Z walls
+        if zc < 0.5 + support:  # near back wall (zc = 0.5)
+            zc_mir = 1.0 - zc
             dist = ti.sqrt((xc - ii) ** 2 + (yc - jj) ** 2 + (zc_mir - kk) ** 2)
             w_mirror += self.threedelta(dist)
-        if zc > float(self.Nz-1) - support:
-            zc_mir = 2.0 * float(self.Nz-1) - zc
+        if zc > float(self.Nz) - 1.5 - support:  # near front wall (zc = Nz-1.5)
+            zc_mir = 2.0 * (float(self.Nz) - 1.5) - zc
             dist = ti.sqrt((xc - ii) ** 2 + (yc - jj) ** 2 + (zc_mir - kk) ** 2)
             w_mirror += self.threedelta(dist)
 
