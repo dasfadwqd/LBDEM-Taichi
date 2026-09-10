@@ -247,7 +247,7 @@ class DEMSolver:
 
             # Damping parameters
             self.mf[0].dp_nratio = contact_model.damping_normal
-            self.mf[0].dp_tratio = contact_model.damping_tangential
+            self.mf[0].dp_sratio = contact_model.damping_tangential
 
             # Friction coefficients
             self.mf[0].coefficientFriction = contact_model.pp_friction  # Particle-Particle
@@ -281,7 +281,7 @@ class DEMSolver:
                 self.mf[0].stiffness_tangent = 0.0
             if hasattr(self.mf[0], 'dp_nratio'):
                 self.mf[0].dp_nratio = 0.0
-                self.mf[0].dp_tratio = 0.0
+                self.mf[0].dp_sratio = 0.0
 
         else:
             raise ValueError(
@@ -703,8 +703,8 @@ class DEMSolver:
             delta_n = -gap  # For parameter calculation only
 
             # For debug only
-            if delta_n > 0.05 * ti.min(gf[i].radius, gf[j].radius):
-                print("WARNING: Overlap particle-particle exceeds 0.05")
+            # if delta_n > 0.05 * ti.min(gf[i].radius, gf[j].radius):
+            #     print("WARNING: Overlap particle-particle exceeds 0.05")
 
             cf[offset].position = gf[i].position + a * (gf[i].radius - delta_n)
             r_i = cf[offset].position - gf[i].position
@@ -778,8 +778,8 @@ class DEMSolver:
         distance = gf[i].radius - delta_n
 
         # For debug only
-        if delta_n > 0.05 * gf[i].radius:
-            print("WARNING: Overlap particle-wall exceeds 0.05")
+        # if delta_n > 0.05 * gf[i].radius:
+        #     print("WARNING: Overlap particle-wall exceeds 0.05")
 
         r_i =  distance * wf[j].normal
         wcf[i, j].position = gf[i].position + r_i
