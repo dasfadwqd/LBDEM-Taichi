@@ -183,8 +183,15 @@ class BasicLattice3D:
             if self.CT[i, j, k] & (CellType.OBSTACLE | CellType.VEL_LADD | CellType.FREE_SLIP | CellType.VEL_INLET_LADD):
                 continue
 
+            # wet-node 边界（Skordos/Zou-He）不做 Smagorinsky 修正，保持基准 omega0，
+            # 对应 OpenLB 边界 dynamics 的固定 omega；内部流体按局部应变率更新有效 omega
+            if self.CT[i, j, k] & (CellType.VEL_ZOUHE | CellType.VEL_EXIT | CellType.Pre_ZOUHE
+                                   | CellType.VEL_SKORDOS | CellType.PRE_SKORDOS):
+                self.omega[i, j, k] = self.omega0
+            else:
+                self.computeOmega(i, j, k)
+
             # update the equilibrium state
-            self.computeOmega(i, j, k)
             self.compute_feq(i, j, k)
             # collision (relax the distribution functions towards equilibrium)
             for q in ti.static(range(BasicLattice3D.Q)):
@@ -214,7 +221,8 @@ class BasicLattice3D:
 
                 # streaming
                 if self.CT[iNext, jNext, kNext] & (
-                        CellType.FLUID | CellType.VEL_ZOUHE | CellType.VEL_EXIT |CellType.Pre_ZOUHE ):  # propogation
+                        CellType.FLUID | CellType.VEL_ZOUHE | CellType.VEL_EXIT | CellType.Pre_ZOUHE
+                        | CellType.VEL_SKORDOS | CellType.PRE_SKORDOS):  # propogation
                     self.f[i, j, k][q] = self.fpc[iNext, jNext, kNext][q]
                 elif self.CT[iNext, jNext, kNext] & CellType.OBSTACLE:  # bounce-back
                     self.f[i, j, k][q] = self.fpc[i, j, k][BasicLattice3D.qinv[q]]
@@ -226,7 +234,7 @@ class BasicLattice3D:
                     cu = tm.dot(BasicLattice3D.c[q], self.vel[iNext, jNext, kNext])
                     self.f[i, j, k][q] = (self.fpc[i, j, k][BasicLattice3D.qinv[q]]
                                           + 2.0 * BasicLattice3D.w[q]
-                                          * self.rho[iNext, jNext, kNext] * cu / BasicLattice3D.cssq)
+                                          * self.rho[i, j, k] * cu / BasicLattice3D.cssq)
                 elif self.CT[iNext, jNext, kNext] & CellType.FREE_SLIP:  # specular reflection
                     if self.CT[iNext, jNext, kNext] & (CellType.LEFT | CellType.RIGHT):
                         self.f[i, j, k][q] = self.fpc[i, jNext, kNext][BasicLattice3D.qsyx[q]]
@@ -244,6 +252,10 @@ class BasicLattice3D:
                 self.vel_zouHe(i, j, k)
             elif self.CT[i, j, k] & CellType.VEL_EXIT:
                 self.bc_vel_exit(i, j, k)
+            elif self.CT[i, j, k] & CellType.VEL_SKORDOS:
+                self.vel_skordos(i, j, k)
+            elif self.CT[i, j, k] & CellType.PRE_SKORDOS:
+                self.pre_skordos(i, j, k)
             elif self.CT[i, j, k] & CellType.Pre_ZOUHE:
                 self.pre_zouHe(i, j, k)
             elif self.CT[i, j, k] & CellType.VEL_INLET_LADD:
@@ -527,6 +539,208 @@ class BasicLattice3D:
         elif self.CT[i, j, k] & CellType.FRONT:  self.rho[i, j, k] = self.rho[i, j, k - 1]
 
 
+    # ============================================#
+    # ----- Skordos Regularized Boundary BC ----- #
+    # ============================================#
+    @ti.func
+    def _skordos_reconstruct(self, i: int, j: int, k: int,
+                             rho_b: float, u_b: Vector3,
+                             dx_u: Vector3, dy_u: Vector3, dz_u: Vector3):
+        """Skordos 正则化重构：f_i = f_i^eq(rho_b, u_b) + f_i^neq(Pi)。
+
+        对应 OpenLB 的 PlaneFdBoundaryProcessor3D + firstOrderLbHelpers::fromPiToFneq：
+          Pi_ab   = -rho * cs^2 / omega * (d_a u_b + d_b u_a)
+          f_i^neq = w_i / (2 cs^4) * (c_ia c_ib - cs^2 d_ab) * Pi_ab
+        19 个方向共用同一条公式，天然对称，避免 Zou-He 逐方向重构的散点问题。
+        """
+        sToPi = -rho_b * (1.0 / 3.0) / self.omega0          # -rho * cs^2 / omega（边界用基准 omega0，与 collide 一致）
+        pxx = sToPi * 2.0 * dx_u.x
+        pyy = sToPi * 2.0 * dy_u.y
+        pzz = sToPi * 2.0 * dz_u.z
+        pxy = sToPi * (dx_u.y + dy_u.x)
+        pxz = sToPi * (dx_u.z + dz_u.x)
+        pyz = sToPi * (dy_u.z + dz_u.y)
+        trace = pxx + pyy + pzz
+        uv = tm.dot(u_b, u_b)
+        for q in ti.static(range(BasicLattice3D.Q)):
+            cq = BasicLattice3D.c[q]
+            cu = tm.dot(cq, u_b)
+            feq = BasicLattice3D.w[q] * rho_b * (1.0 + 3.0 * cu + 4.5 * cu * cu - 1.5 * uv)
+            fneq = 4.5 * BasicLattice3D.w[q] * (
+                cq.x * cq.x * pxx + cq.y * cq.y * pyy + cq.z * cq.z * pzz
+                + 2.0 * cq.x * cq.y * pxy + 2.0 * cq.x * cq.z * pxz + 2.0 * cq.y * cq.z * pyz
+                - (1.0 / 3.0) * trace)
+            self.f[i, j, k][q] = feq + fneq
+        self.rho[i, j, k] = rho_b
+        self.vel[i, j, k] = u_b
+
+    @ti.func
+    def vel_skordos(self, i: int, j: int, k: int):
+        """Skordos 正则化速度边界（入口）。
+
+        u_b 由 self.vel 预设（均匀速度）；rho_b 用 Zou-He 质量守恒公式；
+        分布函数用速度梯度的正则化重构（法向二阶单侧 + 切向中心差分）。
+        注：OpenLB 的 velocityBMRho 含一个额外的 +1，这里沿用标准 Zou-He
+        公式（无 +1），与你现有 vel_zouHe 一致。
+        """
+        u_b = self.vel[i, j, k]
+        rho_b = 1.0
+        dx_u = Vector3(0.0, 0.0, 0.0)
+        dy_u = Vector3(0.0, 0.0, 0.0)
+        dz_u = Vector3(0.0, 0.0, 0.0)
+
+        if self.CT[i, j, k] & CellType.LEFT:
+            fout = (self.f[i, j, k][2] + self.f[i, j, k][8] + self.f[i, j, k][10]
+                    + self.f[i, j, k][12] + self.f[i, j, k][14])
+            ftan = (self.f[i, j, k][0] + self.f[i, j, k][3] + self.f[i, j, k][4]
+                    + self.f[i, j, k][5] + self.f[i, j, k][6] + self.f[i, j, k][15]
+                    + self.f[i, j, k][16] + self.f[i, j, k][17] + self.f[i, j, k][18])
+            rho_b = (ftan + 2.0 * fout) / (1.0 - u_b.x)
+            dx_u = (-3.0 * u_b + 4.0 * self.vel[i + 1, j, k] - self.vel[i + 2, j, k]) / 2.0
+            dy_u = (self.vel[i, j + 1, k] - self.vel[i, j - 1, k]) / 2.0
+            dz_u = (self.vel[i, j, k + 1] - self.vel[i, j, k - 1]) / 2.0
+
+        elif self.CT[i, j, k] & CellType.RIGHT:
+            fout = (self.f[i, j, k][1] + self.f[i, j, k][7] + self.f[i, j, k][9]
+                    + self.f[i, j, k][11] + self.f[i, j, k][13])
+            ftan = (self.f[i, j, k][0] + self.f[i, j, k][3] + self.f[i, j, k][4]
+                    + self.f[i, j, k][5] + self.f[i, j, k][6] + self.f[i, j, k][15]
+                    + self.f[i, j, k][16] + self.f[i, j, k][17] + self.f[i, j, k][18])
+            rho_b = (ftan + 2.0 * fout) / (1.0 + u_b.x)
+            dx_u = (3.0 * u_b - 4.0 * self.vel[i - 1, j, k] + self.vel[i - 2, j, k]) / 2.0
+            dy_u = (self.vel[i, j + 1, k] - self.vel[i, j - 1, k]) / 2.0
+            dz_u = (self.vel[i, j, k + 1] - self.vel[i, j, k - 1]) / 2.0
+
+        elif self.CT[i, j, k] & CellType.BOTTOM:
+            fout = (self.f[i, j, k][4] + self.f[i, j, k][8] + self.f[i, j, k][9]
+                    + self.f[i, j, k][16] + self.f[i, j, k][18])
+            ftan = (self.f[i, j, k][0] + self.f[i, j, k][1] + self.f[i, j, k][2]
+                    + self.f[i, j, k][5] + self.f[i, j, k][6] + self.f[i, j, k][11]
+                    + self.f[i, j, k][12] + self.f[i, j, k][13] + self.f[i, j, k][14])
+            rho_b = (ftan + 2.0 * fout) / (1.0 - u_b.y)
+            dx_u = (self.vel[i + 1, j, k] - self.vel[i - 1, j, k]) / 2.0
+            dy_u = (-3.0 * u_b + 4.0 * self.vel[i, j + 1, k] - self.vel[i, j + 2, k]) / 2.0
+            dz_u = (self.vel[i, j, k + 1] - self.vel[i, j, k - 1]) / 2.0
+
+        elif self.CT[i, j, k] & CellType.TOP:
+            fout = (self.f[i, j, k][3] + self.f[i, j, k][7] + self.f[i, j, k][10]
+                    + self.f[i, j, k][15] + self.f[i, j, k][17])
+            ftan = (self.f[i, j, k][0] + self.f[i, j, k][1] + self.f[i, j, k][2]
+                    + self.f[i, j, k][5] + self.f[i, j, k][6] + self.f[i, j, k][11]
+                    + self.f[i, j, k][12] + self.f[i, j, k][13] + self.f[i, j, k][14])
+            rho_b = (ftan + 2.0 * fout) / (1.0 + u_b.y)
+            dx_u = (self.vel[i + 1, j, k] - self.vel[i - 1, j, k]) / 2.0
+            dy_u = (3.0 * u_b - 4.0 * self.vel[i, j - 1, k] + self.vel[i, j - 2, k]) / 2.0
+            dz_u = (self.vel[i, j, k + 1] - self.vel[i, j, k - 1]) / 2.0
+
+        elif self.CT[i, j, k] & CellType.BACK:
+            fout = (self.f[i, j, k][6] + self.f[i, j, k][12] + self.f[i, j, k][13]
+                    + self.f[i, j, k][16] + self.f[i, j, k][17])
+            ftan = (self.f[i, j, k][0] + self.f[i, j, k][1] + self.f[i, j, k][2]
+                    + self.f[i, j, k][3] + self.f[i, j, k][4] + self.f[i, j, k][7]
+                    + self.f[i, j, k][8] + self.f[i, j, k][9] + self.f[i, j, k][10])
+            rho_b = (ftan + 2.0 * fout) / (1.0 - u_b.z)
+            dx_u = (self.vel[i + 1, j, k] - self.vel[i - 1, j, k]) / 2.0
+            dy_u = (self.vel[i, j + 1, k] - self.vel[i, j - 1, k]) / 2.0
+            dz_u = (-3.0 * u_b + 4.0 * self.vel[i, j, k + 1] - self.vel[i, j, k + 2]) / 2.0
+
+        elif self.CT[i, j, k] & CellType.FRONT:
+            fout = (self.f[i, j, k][5] + self.f[i, j, k][11] + self.f[i, j, k][14]
+                    + self.f[i, j, k][15] + self.f[i, j, k][18])
+            ftan = (self.f[i, j, k][0] + self.f[i, j, k][1] + self.f[i, j, k][2]
+                    + self.f[i, j, k][3] + self.f[i, j, k][4] + self.f[i, j, k][7]
+                    + self.f[i, j, k][8] + self.f[i, j, k][9] + self.f[i, j, k][10])
+            rho_b = (ftan + 2.0 * fout) / (1.0 + u_b.z)
+            dx_u = (self.vel[i + 1, j, k] - self.vel[i - 1, j, k]) / 2.0
+            dy_u = (self.vel[i, j + 1, k] - self.vel[i, j - 1, k]) / 2.0
+            dz_u = (3.0 * u_b - 4.0 * self.vel[i, j, k - 1] + self.vel[i, j, k - 2]) / 2.0
+
+        self._skordos_reconstruct(i, j, k, rho_b, u_b, dx_u, dy_u, dz_u)
+
+    @ti.func
+    def pre_skordos(self, i: int, j: int, k: int):
+        """Skordos 正则化压力边界（出口）。
+
+        rho_b 预设（1 = 大气压）；法向速度用 Zou-He 公式、切向速度 = 0；
+        分布函数用速度梯度的正则化重构。
+        注：OpenLB 的 PressureBM::computeU 含一个额外的 +1，这里沿用标准
+        Zou-He 公式（无 +1），与你现有 pre_zouHe 一致。
+        """
+        rho_b = self.rho[i, j, k]
+        u_b = Vector3(0.0, 0.0, 0.0)
+        dx_u = Vector3(0.0, 0.0, 0.0)
+        dy_u = Vector3(0.0, 0.0, 0.0)
+        dz_u = Vector3(0.0, 0.0, 0.0)
+
+        if self.CT[i, j, k] & CellType.LEFT:
+            fout = (self.f[i, j, k][2] + self.f[i, j, k][8] + self.f[i, j, k][10]
+                    + self.f[i, j, k][12] + self.f[i, j, k][14])
+            ftan = (self.f[i, j, k][0] + self.f[i, j, k][3] + self.f[i, j, k][4]
+                    + self.f[i, j, k][5] + self.f[i, j, k][6] + self.f[i, j, k][15]
+                    + self.f[i, j, k][16] + self.f[i, j, k][17] + self.f[i, j, k][18])
+            u_b = Vector3(1.0 - (ftan + 2.0 * fout) / rho_b, 0.0, 0.0)
+            dx_u = (-3.0 * u_b + 4.0 * self.vel[i + 1, j, k] - self.vel[i + 2, j, k]) / 2.0
+            dy_u = (self.vel[i, j + 1, k] - self.vel[i, j - 1, k]) / 2.0
+            dz_u = (self.vel[i, j, k + 1] - self.vel[i, j, k - 1]) / 2.0
+
+        elif self.CT[i, j, k] & CellType.RIGHT:
+            fout = (self.f[i, j, k][1] + self.f[i, j, k][7] + self.f[i, j, k][9]
+                    + self.f[i, j, k][11] + self.f[i, j, k][13])
+            ftan = (self.f[i, j, k][0] + self.f[i, j, k][3] + self.f[i, j, k][4]
+                    + self.f[i, j, k][5] + self.f[i, j, k][6] + self.f[i, j, k][15]
+                    + self.f[i, j, k][16] + self.f[i, j, k][17] + self.f[i, j, k][18])
+            u_b = Vector3((ftan + 2.0 * fout) / rho_b - 1.0, 0.0, 0.0)
+            dx_u = (3.0 * u_b - 4.0 * self.vel[i - 1, j, k] + self.vel[i - 2, j, k]) / 2.0
+            dy_u = (self.vel[i, j + 1, k] - self.vel[i, j - 1, k]) / 2.0
+            dz_u = (self.vel[i, j, k + 1] - self.vel[i, j, k - 1]) / 2.0
+
+        elif self.CT[i, j, k] & CellType.BOTTOM:
+            fout = (self.f[i, j, k][4] + self.f[i, j, k][8] + self.f[i, j, k][9]
+                    + self.f[i, j, k][16] + self.f[i, j, k][18])
+            ftan = (self.f[i, j, k][0] + self.f[i, j, k][1] + self.f[i, j, k][2]
+                    + self.f[i, j, k][5] + self.f[i, j, k][6] + self.f[i, j, k][11]
+                    + self.f[i, j, k][12] + self.f[i, j, k][13] + self.f[i, j, k][14])
+            u_b = Vector3(0.0, 1.0 - (ftan + 2.0 * fout) / rho_b, 0.0)
+            dx_u = (self.vel[i + 1, j, k] - self.vel[i - 1, j, k]) / 2.0
+            dy_u = (-3.0 * u_b + 4.0 * self.vel[i, j + 1, k] - self.vel[i, j + 2, k]) / 2.0
+            dz_u = (self.vel[i, j, k + 1] - self.vel[i, j, k - 1]) / 2.0
+
+        elif self.CT[i, j, k] & CellType.TOP:
+            fout = (self.f[i, j, k][3] + self.f[i, j, k][7] + self.f[i, j, k][10]
+                    + self.f[i, j, k][15] + self.f[i, j, k][17])
+            ftan = (self.f[i, j, k][0] + self.f[i, j, k][1] + self.f[i, j, k][2]
+                    + self.f[i, j, k][5] + self.f[i, j, k][6] + self.f[i, j, k][11]
+                    + self.f[i, j, k][12] + self.f[i, j, k][13] + self.f[i, j, k][14])
+            u_b = Vector3(0.0, (ftan + 2.0 * fout) / rho_b - 1.0, 0.0)
+            dx_u = (self.vel[i + 1, j, k] - self.vel[i - 1, j, k]) / 2.0
+            dy_u = (3.0 * u_b - 4.0 * self.vel[i, j - 1, k] + self.vel[i, j - 2, k]) / 2.0
+            dz_u = (self.vel[i, j, k + 1] - self.vel[i, j, k - 1]) / 2.0
+
+        elif self.CT[i, j, k] & CellType.BACK:
+            fout = (self.f[i, j, k][6] + self.f[i, j, k][12] + self.f[i, j, k][13]
+                    + self.f[i, j, k][16] + self.f[i, j, k][17])
+            ftan = (self.f[i, j, k][0] + self.f[i, j, k][1] + self.f[i, j, k][2]
+                    + self.f[i, j, k][3] + self.f[i, j, k][4] + self.f[i, j, k][7]
+                    + self.f[i, j, k][8] + self.f[i, j, k][9] + self.f[i, j, k][10])
+            u_b = Vector3(0.0, 0.0, 1.0 - (ftan + 2.0 * fout) / rho_b)
+            dx_u = (self.vel[i + 1, j, k] - self.vel[i - 1, j, k]) / 2.0
+            dy_u = (self.vel[i, j + 1, k] - self.vel[i, j - 1, k]) / 2.0
+            dz_u = (-3.0 * u_b + 4.0 * self.vel[i, j, k + 1] - self.vel[i, j, k + 2]) / 2.0
+
+        elif self.CT[i, j, k] & CellType.FRONT:
+            fout = (self.f[i, j, k][5] + self.f[i, j, k][11] + self.f[i, j, k][14]
+                    + self.f[i, j, k][15] + self.f[i, j, k][18])
+            ftan = (self.f[i, j, k][0] + self.f[i, j, k][1] + self.f[i, j, k][2]
+                    + self.f[i, j, k][3] + self.f[i, j, k][4] + self.f[i, j, k][7]
+                    + self.f[i, j, k][8] + self.f[i, j, k][9] + self.f[i, j, k][10])
+            u_b = Vector3(0.0, 0.0, (ftan + 2.0 * fout) / rho_b - 1.0)
+            dx_u = (self.vel[i + 1, j, k] - self.vel[i - 1, j, k]) / 2.0
+            dy_u = (self.vel[i, j + 1, k] - self.vel[i, j - 1, k]) / 2.0
+            dz_u = (3.0 * u_b - 4.0 * self.vel[i, j, k - 1] + self.vel[i, j, k - 2]) / 2.0
+
+        self._skordos_reconstruct(i, j, k, rho_b, u_b, dx_u, dy_u, dz_u)
+
+
     # ==================================#
     # ----- Zou & He Velocity BC ----- #
     # ==================================#
@@ -638,31 +852,57 @@ class BasicLattice3D:
             self.f[i, j, k][16] = self.f[i, j, k][15] + (self.feq[i, j, k][16] - self.feq[i, j, k][15])
             self.f[i, j, k][17] = self.f[i, j, k][18] + (self.feq[i, j, k][17] - self.feq[i, j, k][18])
 
-    # =========================================#
-    # ----- Pressure Exit BC (convective) ----- #
-    # =========================================#
+    # =====================#
+    # ----- Exit BC ----- #
+    # =====================#
     @ti.func
     def bc_vel_exit(self, i: int, j: int, k: int):
-        """Convective pressure outlet: extrapolated velocity + fixed density
-        + equilibrium reconstruction."""
+        """Exit boundary condition with zero velocity gradient.
+
+        Args:
+            i (int): Index of x-coordinate.
+            j (int): Index of y-coordinate.
+            k (int): Index of z-coordinate.
+        """
         if self.CT[i, j, k] & CellType.LEFT:
-            self.vel[i, j, k] = self.vel[i + 1, j, k]
+            self.f[i, j, k][1] = self.f[i + 1, j, k][1]
+            self.f[i, j, k][7] = self.f[i + 1, j, k][7]
+            self.f[i, j, k][9] = self.f[i + 1, j, k][9]
+            self.f[i, j, k][11] = self.f[i + 1, j, k][11]
+            self.f[i, j, k][13] = self.f[i + 1, j, k][13]
         elif self.CT[i, j, k] & CellType.RIGHT:
-            self.vel[i, j, k] = self.vel[i - 1, j, k]
+            self.f[i, j, k][2] = self.f[i - 1, j, k][2]
+            self.f[i, j, k][8] = self.f[i - 1, j, k][8]
+            self.f[i, j, k][10] = self.f[i - 1, j, k][10]
+            self.f[i, j, k][12] = self.f[i - 1, j, k][12]
+            self.f[i, j, k][14] = self.f[i - 1, j, k][14]
         elif self.CT[i, j, k] & CellType.BOTTOM:
-            self.vel[i, j, k] = self.vel[i, j + 1, k]
+            self.f[i, j, k][3] = self.f[i, j + 1, k][3]
+            self.f[i, j, k][7] = self.f[i, j + 1, k][7]
+            self.f[i, j, k][10] = self.f[i, j + 1, k][10]
+            self.f[i, j, k][15] = self.f[i, j + 1, k][15]
+            self.f[i, j, k][17] = self.f[i, j + 1, k][17]
         elif self.CT[i, j, k] & CellType.TOP:
-            self.vel[i, j, k] = self.vel[i, j - 1, k]
+            self.f[i, j, k][4] = self.f[i, j - 1, k][4]
+            self.f[i, j, k][8] = self.f[i, j - 1, k][8]
+            self.f[i, j, k][9] = self.f[i, j - 1, k][9]
+            self.f[i, j, k][16] = self.f[i, j - 1, k][16]
+            self.f[i, j, k][18] = self.f[i, j - 1, k][18]
         elif self.CT[i, j, k] & CellType.BACK:
-            self.vel[i, j, k] = self.vel[i, j, k + 1]
+            self.f[i, j, k][5] = self.f[i, j, k + 1][5]
+            self.f[i, j, k][11] = self.f[i, j, k + 1][11]
+            self.f[i, j, k][14] = self.f[i, j, k + 1][14]
+            self.f[i, j, k][15] = self.f[i, j, k + 1][15]
+            self.f[i, j, k][18] = self.f[i, j, k + 1][18]
         elif self.CT[i, j, k] & CellType.FRONT:
-            self.vel[i, j, k] = self.vel[i, j, k - 1]
+            self.f[i, j, k][6] = self.f[i, j, k - 1][6]
+            self.f[i, j, k][12] = self.f[i, j, k - 1][12]
+            self.f[i, j, k][13] = self.f[i, j, k - 1][13]
+            self.f[i, j, k][16] = self.f[i, j, k - 1][16]
+            self.f[i, j, k][17] = self.f[i, j, k - 1][17]
 
-        self.rho[i, j, k] = 1.0
-        self.compute_feq(i, j, k)
-        for q in ti.static(range(BasicLattice3D.Q)):
-            self.f[i, j, k][q] = self.feq[i, j, k][q]
-
+        # update velocity and density
+        self.compute_rho_vel(i, j, k)
     # ===========================================#
     # ----- Zou & He Velocity and Pressure ----- #
     # ===========================================#
