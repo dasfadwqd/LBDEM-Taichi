@@ -71,7 +71,7 @@ class LinearContactModel(ContactModel):
         # Calculate damping coefficient
         # Uses a formulation based on material damping ratio and effective mass
         Cn = 2. * dp_nratio * ti.sqrt(kn_star * m_star)   # Cn > 0
-        Ct = 2. * dp_sratio * ti.sqrt(kn_star * m_star)  # Ct > 0
+        Ct = 2. * dp_sratio * ti.sqrt(ks_star * m_star)  # Ct > 0
 
         # Shear displacement increments
         shear_increment = v_c * dt
@@ -122,7 +122,7 @@ class LinearContactModel(ContactModel):
 
         # Calculate damping coefficient
         Cn = 2. * dp_nratio * ti.sqrt(kn_star * m_star)  # Cn > 0
-        Ct = 2. * dp_sratio * ti.sqrt(kn_star * m_star)  # Ct > 0
+        Ct = 2. * dp_sratio * ti.sqrt(ks_star * m_star)  # Ct > 0
 
         # Shear displacement increments
         shear_increment = v_c * dt
