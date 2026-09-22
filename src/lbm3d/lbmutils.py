@@ -82,6 +82,10 @@ class CellType:
 
 
     Pre_ZOUHE = 0b_0000_0001_0000_0000  # 256: pressure boundary
+
+    # Skordos regularized wet-node boundaries (velocity-gradient reconstruction)
+    VEL_SKORDOS = 0b_1000_0000_0000_0000_0000  # 524288: Skordos regularized velocity boundary
+    PRE_SKORDOS = 0b_0001_0000_0000_0000_0000_0000  # 1048576: Skordos regularized pressure boundary
     VEL_INLET_LADD = 0b_0100_0000_0000_0000_0000  # 262144
     # boundary conditions 2
     NO_FLUID_NEIGH = 0b_0000_0010_0000_0000  # 512: no gas neighbour interface cells

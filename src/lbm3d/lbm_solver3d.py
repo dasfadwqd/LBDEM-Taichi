@@ -185,11 +185,11 @@ class BasicLattice3D:
 
             # wet-node 边界（Skordos/Zou-He）不做 Smagorinsky 修正，保持基准 omega0，
             # 对应 OpenLB 边界 dynamics 的固定 omega；内部流体按局部应变率更新有效 omega
-            if self.CT[i, j, k] & (CellType.VEL_ZOUHE | CellType.VEL_EXIT | CellType.Pre_ZOUHE
-                                   | CellType.VEL_SKORDOS | CellType.PRE_SKORDOS):
-                self.omega[i, j, k] = self.omega0
-            else:
-                self.computeOmega(i, j, k)
+            # if self.CT[i, j, k] & (CellType.VEL_ZOUHE | CellType.VEL_EXIT | CellType.Pre_ZOUHE
+            #                        | CellType.VEL_SKORDOS | CellType.PRE_SKORDOS):
+            #     self.omega[i, j, k] = self.omega0
+            # else:
+            #     self.computeOmega(i, j, k)
 
             # update the equilibrium state
             self.compute_feq(i, j, k)
