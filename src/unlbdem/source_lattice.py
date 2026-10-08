@@ -24,7 +24,6 @@ The time-step order is::
     stream()          # inherited standard streaming and macro update
 """
 
-import numpy as np
 import taichi as ti
 import taichi.math as tm
 
@@ -115,23 +114,9 @@ class SourceTermLattice3D(BasicLattice3D):
         self.nu = self.nuLu * dx * dx / dt
         self.mu = rho * self.nu
 
-        # Non-orthogonal D3Q19 polynomial moment basis. The first four rows
-        # are the conserved density and momentum moments; rows 5--9 are the
-        # five deviatoric/shear-stress moments controlled by the local
-        # molecular+SGS viscosity.
-        mrt_matrix = self._build_mrt_matrix()
-        self.mrt_matrix = ti.field(float, shape=(self.Q, self.Q))
-        self.mrt_inverse = ti.field(float, shape=(self.Q, self.Q))
-        self.mrt_relaxation = ti.field(float, shape=(self.Q,))
-        self.mrt_matrix.from_numpy(mrt_matrix)
-        self.mrt_inverse.from_numpy(np.linalg.inv(mrt_matrix))
-        self.mrt_relaxation.from_numpy(np.array([
-            0.0, 0.0, 0.0, 0.0,  # rho, jx, jy, jz
-            1.0,                  # kinetic-energy/bulk mode
-            0.0, 0.0, 0.0, 0.0, 0.0,  # local shear rate, set in collide
-            1.2, 1.2, 1.2, 1.2, 1.2, 1.2,  # third-order modes
-            1.4, 1.4, 1.4,       # fourth-order modes
-        ], dtype=np.float64))
+        # The orthogonal D3Q19 MRT matrix and its matched relaxation spectrum
+        # are allocated by BasicLattice3D.  Keeping a single definition avoids
+        # moment-order drift between pure-fluid and coupled solvers.
 
         # Eulerian 相场
         self.volfrac = ti.field(float, shape=(Nx, Ny, Nz))          # 固含率 eps_s
@@ -152,32 +137,6 @@ class SourceTermLattice3D(BasicLattice3D):
         self.fluid_fraction.fill(1.0)
         self.prev_fluid_fraction.fill(1.0)
         self.body_force.fill(0.0)
-
-    @staticmethod
-    def _build_mrt_matrix():
-        """Return a full-rank polynomial moment basis for this D3Q19 order."""
-        c = np.array([
-            [0, 0, 0], [1, 0, 0], [-1, 0, 0],
-            [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1],
-            [1, 1, 0], [-1, -1, 0], [1, -1, 0], [-1, 1, 0],
-            [1, 0, 1], [-1, 0, -1], [1, 0, -1], [-1, 0, 1],
-            [0, 1, 1], [0, -1, -1], [0, 1, -1], [0, -1, 1],
-        ], dtype=np.float64)
-        cx, cy, cz = c.T
-        return np.array([
-            np.ones(c.shape[0]),
-            cx, cy, cz,
-            cx * cx + cy * cy + cz * cz,
-            cx * cx - cy * cy,
-            cy * cy - cz * cz,
-            cx * cy, cx * cz, cy * cz,
-            cx * cx * cy, cx * cx * cz,
-            cx * cy * cy, cy * cy * cz,
-            cx * cz * cz, cy * cz * cz,
-            cx * cx * cy * cy,
-            cx * cx * cz * cz,
-            cy * cy * cz * cz,
-        ], dtype=np.float64)
 
     # ------------------------------------------------------------------
     # 权重函数（张量积核）
@@ -586,7 +545,7 @@ class SourceTermLattice3D(BasicLattice3D):
             e_dot_sm = tm.dot(direction, Sm)
             e_dot_u = tm.dot(direction, velocity)
             self.gfield[i, j, k][q] = self.w[q] * Sq
-            self.Ffield[i, j, k][q] = self.w[q] * rho * (
+            self.Ffield[i, j, k][q] = self.w[q]  * (
                 e_dot_sm / self.cssq
                 + (e_dot_u * e_dot_sm - self.cssq * u_dot_sm)
                 / (2.0 * self.cssq * self.cssq)
@@ -756,7 +715,11 @@ class SourceTermLattice3D(BasicLattice3D):
             for q in ti.static(range(self.Q)):
                 moment_noneq[moment] += self.mrt_matrix[moment, q] * f_noneq[q]
             relaxation = self.mrt_relaxation[moment]
-            if ti.static(5 <= moment < 10):
+            # Viscous stress moments in the inherited orthogonal basis.
+            if ti.static(
+                moment == 9 or moment == 11 or moment == 13
+                or moment == 14 or moment == 15
+            ):
                 relaxation = shear_relaxation
             moment_collision[moment] = -relaxation * moment_noneq[moment]
         for q in ti.static(range(self.Q)):
