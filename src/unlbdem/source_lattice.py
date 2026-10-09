@@ -536,7 +536,7 @@ class SourceTermLattice3D(BasicLattice3D):
     @ti.func
     def compute_gF_distribution(self, i: int, j: int, k: int,
                                 Sq: float, Sm: Vector3):
-        """把 ``(Sq, Sm)`` 投影到离散速度方向，写入 gfield/Ffield（Eq.22/23）。"""
+        """把 ``(Sq, Sm)``  投影到离散速度方向，写入 gfield/Ffield（Eq.22/23）。"""
         rho = self.rho[i, j, k]
         velocity = self.vel[i, j, k]
         u_dot_sm = tm.dot(velocity, Sm)
