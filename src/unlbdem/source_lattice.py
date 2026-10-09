@@ -545,7 +545,7 @@ class SourceTermLattice3D(BasicLattice3D):
             e_dot_sm = tm.dot(direction, Sm)
             e_dot_u = tm.dot(direction, velocity)
             self.gfield[i, j, k][q] = self.w[q] * Sq
-            self.Ffield[i, j, k][q] = self.w[q]  * (
+            self.Ffield[i, j, k][q] = self.w[q]  *  (
                 e_dot_sm / self.cssq
                 + (e_dot_u * e_dot_sm - self.cssq * u_dot_sm)
                 / (2.0 * self.cssq * self.cssq)
