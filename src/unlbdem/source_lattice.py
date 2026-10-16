@@ -64,9 +64,6 @@ WET_NODE_BOUNDARY_MASK = (
     | CellType.PRE_SKORDOS
 )
 
-SOLID_WALL_MASK = CellType.OBSTACLE | CellType.VEL_LADD | CellType.FREE_SLIP
-
-
 @ti.data_oriented
 class SourceTermLattice3D(BasicLattice3D):
     """D3Q19 unresolved LBM-DEM solver with VANSE source terms.
@@ -85,30 +82,19 @@ class SourceTermLattice3D(BasicLattice3D):
     """
 
     MIN_FLUID_FRACTION = 1.0e-6
-    WALE_CONSTANT = 0.325
-    VON_KARMAN_CONSTANT = 0.41
 
     def __init__(self, Nx: int, Ny: int, Nz: int, omega: float,
                  dx: float, dt: float, rho: float, demsolver: DEMSolver,
                  periodic=(False, False, False), collision_model="bgk",
                  turbulence_model="none"):
-        super().__init__(Nx, Ny, Nz, omega, dx, dt, rho)
-
-        collision_model = collision_model.lower()
-        turbulence_model = turbulence_model.lower()
-        if collision_model not in ("bgk", "mrt"):
-            raise ValueError("collision_model must be 'bgk' or 'mrt'")
-        if turbulence_model not in ("none", "smagorinsky", "wale"):
-            raise ValueError(
-                "turbulence_model must be 'none', 'smagorinsky' or 'wale'"
-            )
-        self.collision_model = collision_model
-        self.turbulence_model = turbulence_model
+        super().__init__(
+            Nx, Ny, Nz, omega, dx, dt, rho,
+            collision_model=collision_model,
+            turbulence_model=turbulence_model,
+            periodic=periodic,
+        )
 
         self.dem = demsolver
-        self.periodic_x = bool(periodic[0])
-        self.periodic_y = bool(periodic[1])
-        self.periodic_z = bool(periodic[2])
         self.rho0 = rho
         self.nuLu = (1.0 / omega - 0.5) / 3.0
         self.nu = self.nuLu * dx * dx / dt
@@ -593,110 +579,14 @@ class SourceTermLattice3D(BasicLattice3D):
         )
 
     @ti.func
-    def _velocity_gradient(self, i: int, j: int, k: int):
-        """Central-difference velocity gradient in lattice units."""
-        im, _ = self._source_index_x(i - 1)
-        ip, _ = self._source_index_x(i + 1)
-        jm, _ = self._source_index_y(j - 1)
-        jp, _ = self._source_index_y(j + 1)
-        km, _ = self._source_index_z(k - 1)
-        kp, _ = self._source_index_z(k + 1)
-
-        gradient = ti.Matrix.zero(float, self.D, self.D)
-        du_dx = 0.5 * (self.vel[ip, j, k] - self.vel[im, j, k])
-        du_dy = 0.5 * (self.vel[i, jp, k] - self.vel[i, jm, k])
-        du_dz = 0.5 * (self.vel[i, j, kp] - self.vel[i, j, km])
-        for component in ti.static(range(self.D)):
-            gradient[component, 0] = du_dx[component]
-            gradient[component, 1] = du_dy[component]
-            gradient[component, 2] = du_dz[component]
-        return gradient
-
-    @ti.func
-    def _wale_mixing_length(self, i: int, j: int, k: int) -> float:
-        """Paper-style WALE mixing length in lattice units."""
-        wall_distance = 1.0e20
-        has_wall = 0
-        if ti.static(not self.periodic_x):
-            if self.CT[0, j, k] & SOLID_WALL_MASK:
-                wall_distance = ti.min(wall_distance, ti.cast(i, float) - 0.5)
-                has_wall = 1
-            if self.CT[self.Nx - 1, j, k] & SOLID_WALL_MASK:
-                wall_distance = ti.min(
-                    wall_distance, ti.cast(self.Nx, float) - 1.5 - ti.cast(i, float)
-                )
-                has_wall = 1
-        if ti.static(not self.periodic_y):
-            if self.CT[i, 0, k] & SOLID_WALL_MASK:
-                wall_distance = ti.min(wall_distance, ti.cast(j, float) - 0.5)
-                has_wall = 1
-            if self.CT[i, self.Ny - 1, k] & SOLID_WALL_MASK:
-                wall_distance = ti.min(
-                    wall_distance, ti.cast(self.Ny, float) - 1.5 - ti.cast(j, float)
-                )
-                has_wall = 1
-        if ti.static(not self.periodic_z):
-            if self.CT[i, j, 0] & SOLID_WALL_MASK:
-                wall_distance = ti.min(wall_distance, ti.cast(k, float) - 0.5)
-                has_wall = 1
-            if self.CT[i, j, self.Nz - 1] & SOLID_WALL_MASK:
-                wall_distance = ti.min(
-                    wall_distance, ti.cast(self.Nz, float) - 1.5 - ti.cast(k, float)
-                )
-                has_wall = 1
-
-        mixing_length = self.WALE_CONSTANT
-        if has_wall:
-            mixing_length = ti.min(
-                mixing_length,
-                self.VON_KARMAN_CONSTANT * ti.max(wall_distance, 0.0),
-            )
-        return mixing_length
-
-    @ti.func
-    def _wale_viscosity(self, i: int, j: int, k: int) -> float:
-        """Return the WALE sub-grid viscosity in lattice units."""
-        gradient = self._velocity_gradient(i, j, k)
-        strain = 0.5 * (gradient + gradient.transpose())
-        gradient_sq = gradient @ gradient
-        trace_gradient_sq = (
-            gradient_sq[0, 0] + gradient_sq[1, 1] + gradient_sq[2, 2]
-        )
-        sd = 0.5 * (gradient_sq + gradient_sq.transpose())
-        for axis in ti.static(range(self.D)):
-            sd[axis, axis] -= trace_gradient_sq / 3.0
-
-        strain_norm_sq = 0.0
-        sd_norm_sq = 0.0
-        for row in ti.static(range(self.D)):
-            for column in ti.static(range(self.D)):
-                strain_norm_sq += strain[row, column] ** 2
-                sd_norm_sq += sd[row, column] ** 2
-
-        denominator = (
-            tm.pow(strain_norm_sq, 2.5) + tm.pow(sd_norm_sq, 1.25)
-        )
-        nu_turb = 0.0
-        if denominator > 1.0e-30:
-            mixing_length = self._wale_mixing_length(i, j, k)
-            nu_turb = (
-                mixing_length ** 2 * tm.pow(sd_norm_sq, 1.5) / denominator
-            )
-        return nu_turb
-
-    @ti.func
     def _local_shear_relaxation(self, i: int, j: int, k: int) -> float:
-        """Return local shear relaxation for none/Smagorinsky/WALE."""
+        """Return local shear relaxation for none/Smagorinsky."""
         shear_relaxation = self.omega0
         is_wet_boundary = (self.CT[i, j, k] & WET_NODE_BOUNDARY_MASK) != 0
         if not is_wet_boundary:
             if ti.static(self.turbulence_model == "smagorinsky"):
                 self.computeOmega(i, j, k)
                 shear_relaxation = self.omega[i, j, k]
-            elif ti.static(self.turbulence_model == "wale"):
-                nu_effective = self.nuLu + self._wale_viscosity(i, j, k)
-                tau_effective = 0.5 + nu_effective / self.cssq
-                shear_relaxation = 1.0 / tau_effective
         self.omega[i, j, k] = shear_relaxation
         return shear_relaxation
 

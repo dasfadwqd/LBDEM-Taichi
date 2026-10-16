@@ -14,6 +14,14 @@ import taichi.math as tm
 # =====================================
 Vector3 = ti.types.vector(3, float)
 
+WET_NODE_BOUNDARY_MASK = (
+    CellType.VEL_ZOUHE
+    | CellType.VEL_EXIT
+    | CellType.Pre_ZOUHE
+    | CellType.VEL_SKORDOS
+    | CellType.PRE_SKORDOS
+)
+
 @ti.data_oriented
 class BasicLattice3D:
     """LBM - D3Q19 - cssq = 1/3, w0 = 1/3, w1-w6 = 1/18, w7-w18 = 1/36.
@@ -95,11 +103,12 @@ class BasicLattice3D:
     cssq = 1.0 / 3.0  # speed of sound squared
 
     SmagorinskyConstant = 0.1 # Smagorinsky constant (typically 0.1-0.2)
-
     # =========================#
     # ----- Constructor ----- #
     # =========================#
-    def __init__(self, Nx: int, Ny: int, Nz: int, omega: float, dx: float, dt: float, rho: float):
+    def __init__(self, Nx: int, Ny: int, Nz: int, omega: float, dx: float,
+                 dt: float, rho: float, collision_model="bgk",
+                 turbulence_model="none", periodic=(False, False, False)):
         """Generate a 3D lattice with the mesoscopic and macroscopic variables.
 
         Args:
@@ -110,7 +119,24 @@ class BasicLattice3D:
             dx (float): Lattice spacing [m].
             dt (float): LBM time step [s].
             rho (float): Fluid densty [kg/m^3].
+            collision_model (str): ``"bgk"`` or ``"mrt"``.
+            turbulence_model (str): ``"none"`` or ``"smagorinsky"``.
+            periodic (tuple[bool, bool, bool]): Reserved periodicity setting.
         """
+        collision_model = collision_model.lower()
+        turbulence_model = turbulence_model.lower()
+        if collision_model not in ("bgk", "mrt"):
+            raise ValueError("collision_model must be 'bgk' or 'mrt'")
+        if turbulence_model not in ("none", "smagorinsky"):
+            raise ValueError(
+                "turbulence_model must be 'none' or 'smagorinsky'"
+            )
+        self.collision_model = collision_model
+        self.turbulence_model = turbulence_model
+        self.periodic_x = bool(periodic[0])
+        self.periodic_y = bool(periodic[1])
+        self.periodic_z = bool(periodic[2])
+
         # parameters to define a lattice
         self.Nx = Nx
         self.Ny = Ny
@@ -118,6 +144,22 @@ class BasicLattice3D:
         self.omega = ti.field(float, shape=(Nx, Ny, Nz))
         self.omega.fill(omega)
         self.omega0 = omega
+        self.nuLu = (1.0 / omega - 0.5) / 3.0
+
+        mrt_matrix = self._build_mrt_matrix()
+        self.mrt_matrix = ti.field(float, shape=(self.Q, self.Q))
+        self.mrt_inverse = ti.field(float, shape=(self.Q, self.Q))
+        self.mrt_relaxation = ti.field(float, shape=(self.Q,))
+        self.mrt_matrix.from_numpy(mrt_matrix)
+        self.mrt_inverse.from_numpy(np.linalg.inv(mrt_matrix))
+        # Standard orthogonal D3Q19 MRT spectrum in the moment order returned
+        # by _build_mrt_matrix().  The five viscous-stress entries marked 0.0
+        # here are replaced by the local molecular+LES rate in _mrt_collision.
+        self.mrt_relaxation.from_numpy(np.array([
+            0.0, 1.19, 1.4, 0.0, 1.2, 0.0, 1.2, 0.0, 1.2,
+            0.0, 1.4, 0.0, 1.4, 0.0, 0.0, 0.0,
+            1.98, 1.98, 1.98,
+        ], dtype=np.float64))
 
         # density distribution functions
         self.f = ti.Vector.field(BasicLattice3D.Q, float, shape=(Nx, Ny, Nz))  # density distribution functions
@@ -150,6 +192,46 @@ class BasicLattice3D:
         # derived stress quantities (NEW)
         self.shear_stress_mag = ti.field(float, shape=(Nx, Ny, Nz))  # magnitude of shear stress
 
+    @staticmethod
+    def _build_mrt_matrix():
+        """Return the standard orthogonal D3Q19 MRT moment matrix.
+
+        Moment order: rho, e, epsilon, jx, qx, jy, qy, jz, qz,
+        3pxx, 3pixx, pww, piww, pxy, pyz, pxz, mx, my, mz.
+        Building the rows from polynomials keeps the matrix correct for this
+        solver's discrete-velocity ordering.
+        """
+        c = np.array([
+            [0, 0, 0], [1, 0, 0], [-1, 0, 0],
+            [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1],
+            [1, 1, 0], [-1, -1, 0], [1, -1, 0], [-1, 1, 0],
+            [1, 0, 1], [-1, 0, -1], [1, 0, -1], [-1, 0, 1],
+            [0, 1, 1], [0, -1, -1], [0, 1, -1], [0, -1, 1],
+        ], dtype=np.float64)
+        cx, cy, cz = c.T
+        c2 = cx * cx + cy * cy + cz * cz
+        return np.array([
+            np.ones(c.shape[0]),
+            19.0 * c2 - 30.0,
+            (21.0 * c2 * c2 - 53.0 * c2 + 24.0) / 2.0,
+            cx,
+            (5.0 * c2 - 9.0) * cx,
+            cy,
+            (5.0 * c2 - 9.0) * cy,
+            cz,
+            (5.0 * c2 - 9.0) * cz,
+            3.0 * cx * cx - c2,
+            (3.0 * c2 - 5.0) * (3.0 * cx * cx - c2),
+            cy * cy - cz * cz,
+            (3.0 * c2 - 5.0) * (cy * cy - cz * cz),
+            cx * cy,
+            cy * cz,
+            cx * cz,
+            (cy * cy - cz * cz) * cx,
+            (cz * cz - cx * cx) * cy,
+            (cx * cx - cy * cy) * cz,
+        ], dtype=np.float64)
+
 
     # ===============================================#
     # ----- Initialize Distribution Functions ----- #
@@ -173,30 +255,63 @@ class BasicLattice3D:
     # ===============================#
     # ----- Collision Process ----- #
     # ===============================#
+    @ti.func
+    def _local_shear_relaxation(self, i: int, j: int, k: int) -> float:
+        shear_relaxation = self.omega0
+        is_wet_boundary = (self.CT[i, j, k] & WET_NODE_BOUNDARY_MASK) != 0
+        if not is_wet_boundary:
+            if ti.static(self.turbulence_model == "smagorinsky"):
+                self.computeOmega(i, j, k)
+                shear_relaxation = self.omega[i, j, k]
+        self.omega[i, j, k] = shear_relaxation
+        return shear_relaxation
+
+    @ti.func
+    def _mrt_collision(self, i: int, j: int, k: int,
+                       shear_relaxation: float):
+        f_noneq = ti.Vector.zero(float, self.Q)
+        moment_noneq = ti.Vector.zero(float, self.Q)
+        moment_collision = ti.Vector.zero(float, self.Q)
+        omega_f = ti.Vector.zero(float, self.Q)
+        for q in ti.static(range(self.Q)):
+            f_noneq[q] = self.f[i, j, k][q] - self.feq[i, j, k][q]
+        for moment in ti.static(range(self.Q)):
+            for q in ti.static(range(self.Q)):
+                moment_noneq[moment] += self.mrt_matrix[moment, q] * f_noneq[q]
+            relaxation = self.mrt_relaxation[moment]
+            # Viscous stress moments: 3pxx, pww, pxy, pyz and pxz.
+            if ti.static(
+                moment == 9 or moment == 11 or moment == 13
+                or moment == 14 or moment == 15
+            ):
+                relaxation = shear_relaxation
+            moment_collision[moment] = -relaxation * moment_noneq[moment]
+        for q in ti.static(range(self.Q)):
+            for moment in ti.static(range(self.Q)):
+                omega_f[q] += self.mrt_inverse[q, moment] * moment_collision[moment]
+        return omega_f
+
     @ti.kernel
     def collide(self):
-        """BGK collision operator in LBM.
-                fpc = (1-omega)*f + omega*feq
-        """
+        """Selectable D3Q19 BGK/MRT collision with optional LES viscosity."""
         for i, j, k in ti.ndrange(self.Nx, self.Ny, self.Nz):
             # skip the boundary nodes
             if self.CT[i, j, k] & (CellType.OBSTACLE | CellType.VEL_LADD | CellType.FREE_SLIP | CellType.VEL_INLET_LADD):
                 continue
 
-            # wet-node 边界（Skordos/Zou-He）不做 Smagorinsky 修正，保持基准 omega0，
-            # 对应 OpenLB 边界 dynamics 的固定 omega；内部流体按局部应变率更新有效 omega
-            # if self.CT[i, j, k] & (CellType.VEL_ZOUHE | CellType.VEL_EXIT | CellType.Pre_ZOUHE
-            #                        | CellType.VEL_SKORDOS | CellType.PRE_SKORDOS):
-            #     self.omega[i, j, k] = self.omega0
-            # else:
-            #     self.computeOmega(i, j, k)
-
-            # update the equilibrium state
             self.compute_feq(i, j, k)
-            # collision (relax the distribution functions towards equilibrium)
+            shear_relaxation = self._local_shear_relaxation(i, j, k)
+            omega_f_mrt = ti.Vector.zero(float, self.Q)
+            if ti.static(self.collision_model == "mrt"):
+                omega_f_mrt = self._mrt_collision(i, j, k, shear_relaxation)
             for q in ti.static(range(BasicLattice3D.Q)):
-                self.fpc[i, j, k][q] = (1.0 - self.omega[i, j, k]) * self.f[i, j, k][q] + self.omega[i, j, k] * \
-                                       self.feq[i, j, k][q]
+                if ti.static(self.collision_model == "mrt"):
+                    self.fpc[i, j, k][q] = self.f[i, j, k][q] + omega_f_mrt[q]
+                else:
+                    self.fpc[i, j, k][q] = (
+                        self.f[i, j, k][q]
+                        - shear_relaxation * (self.f[i, j, k][q] - self.feq[i, j, k][q])
+                    )
 
     # ===============================#
     # ----- Streaming Process ----- #
