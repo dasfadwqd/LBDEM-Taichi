@@ -154,6 +154,21 @@ class HertzMindlinContactModel(ContactModel):
 
 
     @ti.func
+    def rolling_torque(self, rolling_omega, normal_force, radius, coefficient, inverse_inertia, dt):
+        """Contact-plane rolling resistance; no resistance to normal-axis spin.
+
+        Coulomb limit mu_r * max(Fn, 0) * R_eff. The single-contact
+        angular-impulse cap avoids a full explicit step reversing the roll.
+        """
+        torque = Vector3(0.0, 0.0, 0.0)
+        speed = rolling_omega.norm()
+        if speed > 1e-12 and inverse_inertia > 0.0:
+            limit = coefficient * ti.max(normal_force, 0.0) * radius
+            magnitude = ti.min(limit, speed / (dt * inverse_inertia))
+            torque = -magnitude * rolling_omega / speed
+        return torque
+
+    @ti.func
     def min_time(self ,r:float, rho:float,Gm:float,v:float):
         a =  0.1631 * v + 0.8766
         b = rho / Gm

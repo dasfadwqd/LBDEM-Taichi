@@ -738,6 +738,21 @@ class DEMSolver:
             # Eqs. (3)-(4)
             ti.atomic_add(gf[i].moment, tm.cross(r_i, F_i_global))
             ti.atomic_add(gf[j].moment, tm.cross(r_j, F_j_global))
+            if ti.static(isinstance(self.config.contact_model, HertzContactConfig)):
+                if ti.static(self.config.contact_model.pp_rolling_friction > 0.0):
+                    relative_omega = gf[i].omega - gf[j].omega
+                    rolling_omega = relative_omega - a * relative_omega.dot(a)
+                    radius = gf[i].radius * gf[j].radius / (gf[i].radius + gf[j].radius)
+                    inverse_inertia = 0.0
+                    if not gf[i].freeze:
+                        inverse_inertia += 1.0 / (0.4 * gf[i].mass * gf[i].radius ** 2)
+                    if not gf[j].freeze:
+                        inverse_inertia += 1.0 / (0.4 * gf[j].mass * gf[j].radius ** 2)
+                    torque = self.contact_model.rolling_torque(
+                        rolling_omega, F[0], radius,
+                        self.config.contact_model.pp_rolling_friction, inverse_inertia, dt)
+                    ti.atomic_add(gf[i].moment, torque)
+                    ti.atomic_add(gf[j].moment, -torque)
 
     @ti.func
     def evaluate_wall(self, i: int, j: int):  # i is particle, j is wall
@@ -805,6 +820,14 @@ class DEMSolver:
         # https://doi.org/10.1002/nme.6568
         # Eqs. (3)-(4)
         ti.atomic_add(gf[i].moment, tm.cross(r_i, F_i_global))
+        if ti.static(isinstance(self.config.contact_model, HertzContactConfig)):
+            if ti.static(self.config.contact_model.pw_rolling_friction > 0.0):
+                rolling_omega = gf[i].omega - a * gf[i].omega.dot(a)
+                inverse_inertia = 1.0 / (0.4 * gf[i].mass * gf[i].radius ** 2)
+                torque = self.contact_model.rolling_torque(
+                    rolling_omega, F[0], gf[i].radius,
+                    self.config.contact_model.pw_rolling_friction, inverse_inertia, dt)
+                ti.atomic_add(gf[i].moment, torque)
 
     @ti.kernel
     def resolve_wall(self):

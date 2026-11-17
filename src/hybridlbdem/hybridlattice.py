@@ -59,9 +59,10 @@ Hybrid Resolved/Unresolved LBM-DEM Coupling (3D)
     _psc_compute_weight() 即时计算，而非在 prepare_step() 中预先计算。
 
 * 混合区细颗粒 eps_p 的处理：
-    _transfer_fine_force() 中 eps_p 含粗颗粒和细颗粒的总固相分数。
-    这是有意为之：粗颗粒占据格子空间，细颗粒实际感受到更拥挤的流体环境，
-    Tenneti 阻力修正应反映总固相，而非仅细颗粒固相。
+    _transfer_fine_force() 中 eps_p 使用局部平均的有效细颗粒固相分数：
+    eps_p = mean(fine_volfrac) / mean(1 - coarse_volfrac)。
+    粗颗粒只作为可用孔隙空间修正，不直接作为 Tenneti 中的非解析颗粒固相，
+    避免与 PSC 粗颗粒动量交换重复计数。
 
 参考文献
 --------
@@ -189,7 +190,9 @@ class HybridLattice3D(BasicLattice3D):
 
         for i, j, k in ti.ndrange(self.Nx, self.Ny, self.Nz):
             if self.CT[i, j, k] & (CellType.OBSTACLE | CellType.VEL_LADD
-                                   | CellType.FREE_SLIP | CellType.VEL_INLET_LADD):
+                                   | CellType.FREE_SLIP | CellType.VEL_INLET_LADD
+                                   | CellType.VEL_ZOUHE | CellType.VEL_EXIT
+                                   | CellType.Pre_ZOUHE | CellType.VEL_SKORDOS | CellType.PRE_SKORDOS):
                 continue
 
             for gid in range(self.dem.gf.shape[0]):
@@ -306,7 +309,9 @@ class HybridLattice3D(BasicLattice3D):
                 for j in range(j_min, j_max):
                     for k in range(k_min, k_max):
                         if self.CT[i, j, k] & (CellType.OBSTACLE | CellType.VEL_LADD
-                                               | CellType.FREE_SLIP | CellType.VEL_INLET_LADD):
+                                               | CellType.FREE_SLIP | CellType.VEL_INLET_LADD
+                                               | CellType.VEL_ZOUHE | CellType.VEL_EXIT
+                                               | CellType.Pre_ZOUHE | CellType.VEL_SKORDOS | CellType.PRE_SKORDOS):
                             continue
                         if self.coarse_volfrac[i, j, k] >= 1.0:
                             continue
@@ -324,7 +329,9 @@ class HybridLattice3D(BasicLattice3D):
                 for j in range(j_min, j_max):
                     for k in range(k_min, k_max):
                         if self.CT[i, j, k] & (CellType.OBSTACLE | CellType.VEL_LADD
-                                               | CellType.FREE_SLIP | CellType.VEL_INLET_LADD):
+                                               | CellType.FREE_SLIP | CellType.VEL_INLET_LADD
+                                               | CellType.VEL_ZOUHE | CellType.VEL_EXIT
+                                               | CellType.Pre_ZOUHE | CellType.VEL_SKORDOS | CellType.PRE_SKORDOS):
                             continue
                         if self.coarse_volfrac[i, j, k] >= 1.0:
                             continue
@@ -342,7 +349,9 @@ class HybridLattice3D(BasicLattice3D):
                 for j in range(j_min, j_max):
                     for k in range(k_min, k_max):
                         if self.CT[i, j, k] & (CellType.OBSTACLE | CellType.VEL_LADD
-                                               | CellType.FREE_SLIP | CellType.VEL_INLET_LADD):
+                                               | CellType.FREE_SLIP | CellType.VEL_INLET_LADD
+                                               | CellType.VEL_ZOUHE | CellType.VEL_EXIT
+                                               | CellType.Pre_ZOUHE | CellType.VEL_SKORDOS | CellType.PRE_SKORDOS):
                             continue
                         if self.coarse_volfrac[i, j, k] >= 1.0:
                             continue
@@ -384,17 +393,21 @@ class HybridLattice3D(BasicLattice3D):
         """
         for i, j, k in ti.ndrange(self.Nx, self.Ny, self.Nz):
             if self.CT[i, j, k] & (CellType.OBSTACLE | CellType.VEL_LADD
-                                   | CellType.FREE_SLIP | CellType.VEL_INLET_LADD):
+                                   | CellType.FREE_SLIP | CellType.VEL_INLET_LADD
+                                   | CellType.VEL_ZOUHE | CellType.VEL_EXIT
+                                   | CellType.Pre_ZOUHE | CellType.VEL_SKORDOS | CellType.PRE_SKORDOS):
                 continue
+            self.fine_weight[i, j, k] = 0.0
             svf = self.fine_volfrac[i, j, k]
-            fvf = 1.0 - svf - self.coarse_volfrac[i, j, k]
-            if svf > 0.0 and fvf > 1e-10:
+            avail = 1.0 - self.coarse_volfrac[i, j, k]
+            if svf > 0.0 and avail > 1e-10:
+                svf_eff = ti.min(svf / avail, 0.99)
                 V_latt = self.unit.dx ** 3
                 R_eff  = ti.pow(3.0 * V_latt * svf / (4.0 * tm.pi), 1.0 / 3.0)
                 v_slip = ((self.fine_velsolid[i, j, k] - self.vel[i, j, k])
                           * self.unit.dx / self.unit.dt)
                 self.fine_weight[i, j, k] = self._weight_coefficient(
-                    2.0 * R_eff, v_slip, svf
+                    2.0 * R_eff, v_slip, svf_eff
                 )
 
     @ti.func
@@ -649,7 +662,9 @@ class HybridLattice3D(BasicLattice3D):
             for j in range(y0, y1):
                 for k in range(z0, z1):
                     if self.CT[i, j, k] & (CellType.OBSTACLE | CellType.VEL_LADD
-                                           | CellType.FREE_SLIP | CellType.VEL_INLET_LADD):
+                                           | CellType.FREE_SLIP | CellType.VEL_INLET_LADD
+                                           | CellType.VEL_ZOUHE | CellType.VEL_EXIT
+                                           | CellType.Pre_ZOUHE | CellType.VEL_SKORDOS | CellType.PRE_SKORDOS):
                         continue
                     if self.coarse_volfrac[i, j, k] > 0.0 and self.coarse_id[i, j, k] == gid:
                         scale  = self.unit.rho * self.unit.dx**4 / self.unit.dt**2
@@ -665,14 +680,13 @@ class HybridLattice3D(BasicLattice3D):
 
         步骤：
           1. 用 _kernel_with_mirror 将流体速度插值到颗粒位置
-          2. 估算颗粒位置处的有效流体分数 eps_fluid
+          2. 估算颗粒位置处的局部平均有效细颗粒固相分数 eps_p
           3. 应用 Tenneti 曳力模型
 
         关于 eps_p 的设计选择：
-          eps_p = 1 - eps_fluid = mean(fine_volfrac + coarse_volfrac)，
-          即总固相分数（含粗颗粒贡献）。
-          混合区域中粗颗粒已占据格子空间，细颗粒感受到的流体环境更拥挤，
-          Tenneti 阻力修正应基于总固相，而非仅细颗粒固相。
+          eps_p = mean(fine_volfrac) / mean(1 - coarse_volfrac)。
+          粗颗粒只压缩细颗粒所在的可用孔隙空间，不直接进入 Tenneti
+          非解析固相分数，避免与 PSC 粗颗粒动量交换重复计数。
         """
         xc = (self.dem.gf[gid].position[0] - self.dem.config.domain.xmin
               + 0.5 * self.unit.dx) / self.unit.dx
@@ -690,7 +704,8 @@ class HybridLattice3D(BasicLattice3D):
         z1 = ti.min(self.Nz,  ti.cast(zc + support + 1, ti.i32))
 
         vel_wsum = Vector3(0.0, 0.0, 0.0)
-        eps_sum  = 0.0
+        fine_sum = 0.0
+        avail_sum = 0.0
         w_total  = 0.0
         n_node   = 0
 
@@ -698,27 +713,31 @@ class HybridLattice3D(BasicLattice3D):
             for j in range(y0, y1):
                 for k in range(z0, z1):
                     if self.CT[i, j, k] & (CellType.OBSTACLE | CellType.VEL_LADD
-                                           | CellType.FREE_SLIP | CellType.VEL_INLET_LADD):
+                                           | CellType.FREE_SLIP | CellType.VEL_INLET_LADD
+                                           | CellType.VEL_ZOUHE | CellType.VEL_EXIT
+                                           | CellType.Pre_ZOUHE | CellType.VEL_SKORDOS | CellType.PRE_SKORDOS):
                         continue
                     w_ij = self._kernel_with_mirror(xc, yc, zc, i, j, k)
                     if w_ij <= 0.0:
                         continue
                     vel_wsum += self.vel[i, j, k] * w_ij
-                    # 流体分数：1 减去总固相（含粗颗粒），反映混合区实际流体空间
-                    eps_sum  += (1.0 - self.fine_volfrac[i, j, k]
-                                     - self.coarse_volfrac[i, j, k])
+                    # Effective fine solid fraction uses local averages:
+                    # mean(fine_volfrac) / mean(available volume).
+                    fine_sum += self.fine_volfrac[i, j, k]
+                    avail_sum += ti.max(1.0 - self.coarse_volfrac[i, j, k], 0.0)
                     w_total  += w_ij
                     n_node   += 1
 
         fluid_vel = Vector3(0.0, 0.0, 0.0)
-        eps_fluid = 0.0
+        eps_p = 0.0
         if w_total > 1e-15:
             fluid_vel = vel_wsum / w_total * self.unit.dx / self.unit.dt
         if n_node > 0:
-            eps_fluid = eps_sum / float(n_node)
+            fine_avg = fine_sum / float(n_node)
+            avail_avg = avail_sum / float(n_node)
+            if avail_avg > 1e-10:
+                eps_p = ti.min(fine_avg / avail_avg, 0.99)
 
-        # eps_p = 总固相分数（含粗颗粒），见上方设计说明
-        eps_p = 1.0 - eps_fluid
         if eps_p > 1e-15:
             d_p   = 2.0 * self.dem.gf[gid].radius
             u_slip = self.dem.gf[gid].velocity - fluid_vel
@@ -763,6 +782,8 @@ class HybridLattice3D(BasicLattice3D):
 
         实现 Zhu et al. (2026) Eq.(22)：当颗粒中心距任意壁面 < 1.5 lu 时，
         将截断的核叶片通过镜像颗粒折叠回域内，防止近壁固相分数被低估。
+
+        壁面位于半格点处：左/底/后 = 0.5，右/顶/前 = N-1.5。
         六面体域的 x、y、z 三对壁面均做检查。
         """
         support = 1.5
@@ -772,30 +793,33 @@ class HybridLattice3D(BasicLattice3D):
         w_primary = self._threedelta(dist)
         w_mirror  = 0.0
 
-        # x 方向壁面
-        if xc < support:
-            d = ti.sqrt((-xc - ii)**2 + (yc-jj)**2 + (zc-kk)**2)
+        # x 方向壁面（镜像面: x = 0.5 / Nx-1.5）
+        if xc < 0.5 + support:
+            xm = 1.0 - xc
+            d  = ti.sqrt((xm-ii)**2 + (yc-jj)**2 + (zc-kk)**2)
             w_mirror += self._threedelta(d)
-        if xc > float(self.Nx - 1) - support:
-            xm = 2.0 * float(self.Nx - 1) - xc
+        if xc > float(self.Nx) - 1.5 - support:
+            xm = 2.0 * (float(self.Nx) - 1.5) - xc
             d  = ti.sqrt((xm-ii)**2 + (yc-jj)**2 + (zc-kk)**2)
             w_mirror += self._threedelta(d)
 
-        # y 方向壁面
-        if yc < support:
-            d = ti.sqrt((xc-ii)**2 + (-yc-jj)**2 + (zc-kk)**2)
+        # y 方向壁面（镜像面: y = 0.5 / Ny-1.5）
+        if yc < 0.5 + support:
+            ym = 1.0 - yc
+            d  = ti.sqrt((xc-ii)**2 + (ym-jj)**2 + (zc-kk)**2)
             w_mirror += self._threedelta(d)
-        if yc > float(self.Ny - 1) - support:
-            ym = 2.0 * float(self.Ny - 1) - yc
+        if yc > float(self.Ny) - 1.5 - support:
+            ym = 2.0 * (float(self.Ny) - 1.5) - yc
             d  = ti.sqrt((xc-ii)**2 + (ym-jj)**2 + (zc-kk)**2)
             w_mirror += self._threedelta(d)
 
-        # z 方向壁面
-        if zc < support:
-            d = ti.sqrt((xc-ii)**2 + (yc-jj)**2 + (-zc-kk)**2)
+        # z 方向壁面（镜像面: z = 0.5 / Nz-1.5）
+        if zc < 0.5 + support:
+            zm = 1.0 - zc
+            d  = ti.sqrt((xc-ii)**2 + (yc-jj)**2 + (zm-kk)**2)
             w_mirror += self._threedelta(d)
-        if zc > float(self.Nz - 1) - support:
-            zm = 2.0 * float(self.Nz - 1) - zc
+        if zc > float(self.Nz) - 1.5 - support:
+            zm = 2.0 * (float(self.Nz) - 1.5) - zc
             d  = ti.sqrt((xc-ii)**2 + (yc-jj)**2 + (zm-kk)**2)
             w_mirror += self._threedelta(d)
 

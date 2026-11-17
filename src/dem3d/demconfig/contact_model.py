@@ -49,12 +49,16 @@ class HertzContactConfig(ContactModelConfig):
     pw_friction: float
     pp_restitution: float
     pw_restitution: float
+    pp_rolling_friction: float = 0.0
+    pw_rolling_friction: float = 0.0
 
 
     def get_model_name(self) -> str:
         return "hertz"
 
     def validate(self):
+        if not (0 <= self.pp_rolling_friction <= 1) or not (0 <= self.pw_rolling_friction <= 1):
+            raise ValueError("Rolling friction coefficients must be between 0 and 1")
         if not (0 <= self.pp_friction <= 1) or not (0 <= self.pw_friction <= 1):
             raise ValueError("Friction coefficients must be between 0 and 1")
         if not (0 <= self.pp_restitution <= 1) or not (0 <= self.pw_restitution <= 1):
